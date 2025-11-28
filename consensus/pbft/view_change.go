@@ -59,6 +59,14 @@ func (vcm *ViewChangeManager) SetOnViewChangeComplete(f func(newView uint64)) {
 }
 
 // StartViewChange initiates a view change to the specified view.
+/**
+ *- newView: 바꾸려는 새 뷰 번호 (예: 1)
+- lastSeqNum: 내가 처리한 마지막 블록 번호 (예: 305)
+- checkpoints: 내가 가진 체크포인트들 (예: [{100}, {200}, {300}])
+- preparedSet: 내가 Prepared 상태인 블록들 (예: [블록301, 블록302])
+*/
+// 바뀐 View로 브로드 캐스트
+
 func (vcm *ViewChangeManager) StartViewChange(newView uint64, lastSeqNum uint64, checkpoints []Checkpoint, preparedSet []PreparedCert) {
 	vcm.mu.Lock()
 	defer vcm.mu.Unlock()
@@ -69,7 +77,8 @@ func (vcm *ViewChangeManager) StartViewChange(newView uint64, lastSeqNum uint64,
 
 	vcm.inProgress = true
 
-	// Create view change message
+	// 뷰 변경 메시지 생성
+	// 포인터로 생성
 	viewChangeMsg := &ViewChangeMsg{
 		NewView:     newView,
 		LastSeqNum:  lastSeqNum,
@@ -93,20 +102,24 @@ func (vcm *ViewChangeManager) StartViewChange(newView uint64, lastSeqNum uint64,
 	}
 }
 
-// HandleViewChange processes a received view change message.
+// 새로운 제안자 체인지 메서드
+// 다른 노드가 보낸 ViewChange 메시지를 처리하는 함수 
+// msg 다른 노드가 보낸 ViewChange 메시지를 처리하는 함수
+// return -> true면 투표가 충분히 된 것이고, false면 아직 부족한 것이다.
 func (vcm *ViewChangeManager) HandleViewChange(msg *ViewChangeMsg) bool {
+	// 쓰기 락
 	vcm.mu.Lock()
 	defer vcm.mu.Unlock()
 
-	// Initialize map for this view if needed
+	// nil 이면 맵 초기화
 	if vcm.viewChangeMsgs[msg.NewView] == nil {
 		vcm.viewChangeMsgs[msg.NewView] = make(map[string]*ViewChangeMsg)
 	}
 
-	// Store the message
+	// 메시지 저장 (투표)
 	vcm.viewChangeMsgs[msg.NewView][msg.NodeID] = msg
 
-	// Check if we have enough view change messages (2f+1)
+	// 충분한 투표 있으면 true 리턴
 	if len(vcm.viewChangeMsgs[msg.NewView]) >= vcm.quorumSize {
 		return true
 	}
@@ -114,25 +127,30 @@ func (vcm *ViewChangeManager) HandleViewChange(msg *ViewChangeMsg) bool {
 	return false
 }
 
-// CreateNewViewMsg creates a new view message (called by the new primary).
+// 새 프라이머리 호출
+// 새 리더가 호출하는 함수 
+// ViewChange 투표들을 모아서 NewView 메세지 생성
 func (vcm *ViewChangeManager) CreateNewViewMsg(newView uint64, validatorCount int) *NewViewMsg {
+	// 읽기 락
 	vcm.mu.RLock()
 	defer vcm.mu.RUnlock()
 
+	// 쿼럼 체크 비탄진 만족?
 	viewChangeMsgs := vcm.viewChangeMsgs[newView]
 	if len(viewChangeMsgs) < vcm.quorumSize {
 		return nil
 	}
 
-	// Collect view change messages
+	// 뷰 체인지 메서드
 	var vcMsgs []ViewChangeMsg
 	for _, msg := range viewChangeMsgs {
 		vcMsgs = append(vcMsgs, *msg)
 	}
 
-	// Compute O (set of pre-prepare messages for the new view)
+	// 이어서 처리할 블록들 계산
 	prePrepares := vcm.computePrePrepareSet(vcMsgs)
 
+	// NewView 메시지 생성
 	newViewMsg := &NewViewMsg{
 		View:           newView,
 		ViewChangeMsgs: vcMsgs,
@@ -145,7 +163,8 @@ func (vcm *ViewChangeManager) CreateNewViewMsg(newView uint64, validatorCount in
 
 // computePrePrepareSet computes the set of pre-prepare messages for the new view.
 func (vcm *ViewChangeManager) computePrePrepareSet(viewChangeMsgs []ViewChangeMsg) []PrePrepareMsg {
-	// Find the maximum stable checkpoint sequence number
+	// 가장 높은 시퀸스 찾음
+	// Go에서는 자동으로 0으로 초기화
 	var maxCheckpoint uint64
 	for _, vcMsg := range viewChangeMsgs {
 		for _, cp := range vcMsg.Checkpoints {
