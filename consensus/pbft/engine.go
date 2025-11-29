@@ -14,25 +14,24 @@ import (
 	"github.com/ahwlsqja/pbft-cosmos/types"
 )
 
-// Config holds the configuration for the PBFT engine.
+// PBFT 엔진 설정 구조체
 type Config struct {
-	// NodeID is the unique identifier for this node.
+	// 노드 ID
 	NodeID string
 
-	// RequestTimeout is the timeout for client requests.
+	// 요청 타임 아웃
 	RequestTimeout time.Duration
 
-	// ViewChangeTimeout is the timeout for view change.
+	// 뷰 체인지 타임아웃 (10초)
 	ViewChangeTimeout time.Duration
 
-	// CheckpointInterval is the interval for creating checkpoints.
+	// 체크포인트 주기 (100블록마다)
 	CheckpointInterval uint64
 
-	// WindowSize is the maximum number of outstanding requests.
+	// 윈도우 크기 (200)
 	WindowSize uint64
 }
 
-// DefaultConfig returns the default PBFT configuration.
 func DefaultConfig(nodeID string) *Config {
 	return &Config{
 		NodeID:             nodeID,
@@ -43,81 +42,81 @@ func DefaultConfig(nodeID string) *Config {
 	}
 }
 
-// Transport defines the interface for sending messages to other nodes.
+// 구현은 다른 파일에서 하짐나 "이런 기능이 필요하다" 정의
 type Transport interface {
-	// Broadcast sends a message to all nodes.
+	// 모든 노드에게 전송
 	Broadcast(msg *Message) error
 
-	// Send sends a message to a specific node.
 	Send(nodeID string, msg *Message) error
 
 	// SetMessageHandler sets the handler for incoming messages.
 	SetMessageHandler(handler func(*Message))
 }
 
-// Application defines the interface for the application layer (ABCI).
+// 앱만에 보내주는 것임 ABCI를 통해서 
 type Application interface {
-	// ExecuteBlock executes a block and returns the result.
+	// 블록 실행
 	ExecuteBlock(block *types.Block) ([]byte, error)
 
-	// ValidateBlock validates a block before consensus.
+	// 블록 검증
 	ValidateBlock(block *types.Block) error
 
-	// GetPendingTransactions returns pending transactions for a new block.
+	// 대기 중인 트랜잭션
 	GetPendingTransactions() []types.Transaction
 
-	// Commit commits the block to the state.
+	// 블록 커밋
 	Commit(block *types.Block) error
 }
 
-// Engine is the main PBFT consensus engine.
+//메인 엔진
 type Engine struct {
 	mu sync.RWMutex
 
+	// 설정
 	config *Config
 
-	// Current view number
+	// 현재 뷰 번호
 	view uint64
 
-	// Current sequence number (block height)
+	// 현재 시퀸스 번호 블록 높이
 	sequenceNum uint64
 
-	// Validator set
+	// 검증자 목록
 	validatorSet *types.ValidatorSet
 
-	// State log for consensus states
+	// 상태 로그 (state.go에 있음)
 	stateLog *StateLog
 
-	// Transport for network communication
+	// 네트워크
 	transport Transport
 
-	// Application layer
+	//애플리케이션
 	app Application
 
-	// Metrics collector
+	// 모니터링
 	metrics *metrics.Metrics
 
-	// Channel for incoming messages
+	// 메시지 채널
 	msgChan chan *Message
 
-	// Channel for new requests (transactions)
+	// 요청 채널
 	requestChan chan *RequestMsg
 
-	// Timer for view change
+	// 뷰 체인지 타이머
 	viewChangeTimer *time.Timer
 
-	// Context for graceful shutdown
+	// 종료 컨텍스트
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// Logger
+	// 로그
 	logger *log.Logger
 
-	// Committed blocks (for chain)
+	// 확정된 블록들
 	committedBlocks []*types.Block
 }
 
-// NewEngine creates a new PBFT consensus engine.
+// 엔진 생성 및 시작
 func NewEngine(config *Config, validatorSet *types.ValidatorSet, transport Transport, app Application, m *metrics.Metrics) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -146,54 +145,65 @@ func NewEngine(config *Config, validatorSet *types.ValidatorSet, transport Trans
 	return engine
 }
 
-// Start starts the PBFT consensus engine.
+// PBFT 컨센서스 엔진 시작
 func (e *Engine) Start() error {
 	e.logger.Printf("[PBFT] Starting engine for node %s", e.config.NodeID)
 
-	// Start the main consensus loop
+	// 메인 루프 시작
 	go e.run()
 
-	// Start the view change timer
+	// 뷰 체인지 타이머 시작
 	e.resetViewChangeTimer()
 
 	return nil
 }
 
-// Stop stops the PBFT consensus engine.
+// 엔진 정지
 func (e *Engine) Stop() {
 	e.logger.Printf("[PBFT] Stopping engine for node %s", e.config.NodeID)
-	e.cancel()
+	e.cancel() // 컨센서스 취소 ->run() 종료
 }
 
-// run is the main consensus loop.
+// 메인 컨센서스 루프 시작
+// 1. ctx.Done(): 종료 신호
+// 2. msgChan: 다른 노드에서 온 메시지 (Preprepare, Prepare, Commit 등)
+// 3. requestChan: 클라이언트 요청 (트랜잭션)
+// select = 여러 채널 중 먼저 오는 것 처리
 func (e *Engine) run() {
 	for {
 		select {
 		case <-e.ctx.Done():
+			// Stop() 호출됨 -> 종료
 			return
 
 		case msg := <-e.msgChan:
+			// 네트워크에서 메시지 도착
 			e.handleMessage(msg)
 
 		case req := <-e.requestChan:
+			// 클라이언트 요청 도착
 			if e.isPrimary() {
-				e.proposeBlock(req)
+				e.proposeBlock(req) // 리더만 블록 제안
 			}
 		}
 	}
 }
 
-// handleIncomingMessage handles incoming messages from the network.
+// 네트워크에서 메시지 오면 채널에 넣음
+// 채널 가득 차면 버림 (non-blocking)
 func (e *Engine) handleIncomingMessage(msg *Message) {
 	select {
 	case e.msgChan <- msg:
+		// 채널에 넣기 성공
 	default:
+		// 채널 가득 참 -> 버림
 		e.logger.Printf("[PBFT] Message channel full, dropping message")
 	}
 }
 
-// handleMessage processes a consensus message.
+// 메시지 타입에 따라 다른 핸들러 호출
 func (e *Engine) handleMessage(msg *Message) {
+	// 매트릭 측정 시작
 	startTime := time.Now()
 	defer func() {
 		if e.metrics != nil {

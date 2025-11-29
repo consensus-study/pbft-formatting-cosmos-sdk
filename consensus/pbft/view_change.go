@@ -130,6 +130,7 @@ func (vcm *ViewChangeManager) HandleViewChange(msg *ViewChangeMsg) bool {
 // 새 프라이머리 호출
 // 새 리더가 호출하는 함수 
 // ViewChange 투표들을 모아서 NewView 메세지 생성
+// 정확히는 리더가 되기 위해 호출하는 함수이다.
 func (vcm *ViewChangeManager) CreateNewViewMsg(newView uint64, validatorCount int) *NewViewMsg {
 	// 읽기 락
 	vcm.mu.RLock()
@@ -204,21 +205,25 @@ func (vcm *ViewChangeManager) computePrePrepareSet(viewChangeMsgs []ViewChangeMs
 	return prePrepares
 }
 
-// HandleNewView processes a received new view message.
+// 새 리더가 보낸 NewViewMsg를 처리하는 함수
 func (vcm *ViewChangeManager) HandleNewView(msg *NewViewMsg) bool {
 	vcm.mu.Lock()
 	defer vcm.mu.Unlock()
 
-	// Verify the new view message
+	// NewViewMsg가 정당한지 검증
+	// ViewChangeMsgs가 2f + 1개 이상인가?
+	// 모든 ViewChnageMsgs가 같은 뷰에 대한 건가?
 	if !vcm.verifyNewViewMsg(msg) {
 		return false
 	}
 
-	// Store the new view message
+	// 메시지 저장
 	vcm.newViewMsgs[msg.View] = msg
 
-	// Update current view
+	// 현재 뷰를 새 뷰로 변경
+	// 이제 공식적으로 View 1
 	vcm.currentView = msg.View
+	// 뷰 체인이 진행 중 플래그 해제
 	vcm.inProgress = false
 
 	// Clean up old view change messages
@@ -236,14 +241,14 @@ func (vcm *ViewChangeManager) HandleNewView(msg *NewViewMsg) bool {
 	return true
 }
 
-// verifyNewViewMsg verifies a new view message.
+// 새 리더가 보낸 NewViewMsg가 정당한지 검증하는 함수
 func (vcm *ViewChangeManager) verifyNewViewMsg(msg *NewViewMsg) bool {
-	// Verify we have 2f+1 view change messages
+	//쿼럼 즉 NewViewMsg안에 ViewChange 투표가 충분히 들어있는지 확인
 	if len(msg.ViewChangeMsgs) < vcm.quorumSize {
 		return false
 	}
 
-	// Verify all view change messages are for the same view
+	// 모든 ViewChange 메시지가 같은 뷰에 대한 건지 확인
 	for _, vcMsg := range msg.ViewChangeMsgs {
 		if vcMsg.NewView != msg.View {
 			return false
