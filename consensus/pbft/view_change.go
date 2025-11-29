@@ -255,8 +255,84 @@ func (vcm *ViewChangeManager) verifyNewViewMsg(msg *NewViewMsg) bool {
 		}
 	}
 
-	// TODO: Verify pre-prepare set is correctly computed
+	// PrePrepare 집합이 올바르게 계산되었는지 검증
+	// 1. ViewChange 메시지들에서 가장 높은 체크포인트 찾기
+	var maxCheckpoint uint64
+	for _, vcMsg := range msg.ViewChangeMsgs {
+		for _, cp := range vcMsg.Checkpoints {
+			if cp.SequenceNum > maxCheckpoint {
+				maxCheckpoint = cp.SequenceNum
+			}
+		}
+	}
 
+	// 2. ViewChange 메시지들에서 Prepared 블록들 수집
+	preparedBlocks := make(map[uint64][]byte) // seqNum -> digest
+	var maxPrepared uint64
+
+	for _, vcMsg := range msg.ViewChangeMsgs {
+		for _, pc := range vcMsg.PreparedSet {
+			seqNum := pc.PrePrepare.SequenceNum
+			if seqNum > maxPrepared {
+				maxPrepared = seqNum
+			}
+			// 같은 시퀀스에 대해 다른 다이제스트가 있으면 안됨 (Safety)
+			if existingDigest, exists := preparedBlocks[seqNum]; exists {
+				if !bytesEqual(existingDigest, pc.PrePrepare.Digest) {
+					// 충돌 발견 - 비잔틴 노드 존재 가능
+					return false
+				}
+			} else {
+				preparedBlocks[seqNum] = pc.PrePrepare.Digest
+			}
+		}
+	}
+
+	// 3. NewView의 PrePrepare들이 올바른지 확인
+	for _, pp := range msg.PrePrepareMsgs {
+		// 체크포인트 이하의 시퀀스는 이미 커밋됨 -> 포함되면 안됨
+		if pp.SequenceNum <= maxCheckpoint {
+			return false
+		}
+
+		// Prepared 블록이 있으면 같은 다이제스트여야 함
+		if expectedDigest, exists := preparedBlocks[pp.SequenceNum]; exists {
+			if !bytesEqual(expectedDigest, pp.Digest) {
+				return false
+			}
+		}
+	}
+
+	// 4. maxCheckpoint+1 ~ maxPrepared 사이의 모든 Prepared 블록이 포함되어야 함
+	for seqNum := maxCheckpoint + 1; seqNum <= maxPrepared; seqNum++ {
+		if _, hasPrepared := preparedBlocks[seqNum]; hasPrepared {
+			// 이 시퀀스에 대한 PrePrepare가 NewView에 있어야 함
+			found := false
+			for _, pp := range msg.PrePrepareMsgs {
+				if pp.SequenceNum == seqNum {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+// bytesEqual - 두 바이트 슬라이스 비교
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
 	return true
 }
 

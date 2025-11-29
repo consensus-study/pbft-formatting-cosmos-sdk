@@ -105,6 +105,12 @@ type Engine struct {
 	// 뷰 체인지 타이머
 	viewChangeTimer *time.Timer
 
+	// 뷰 체인지 매니저 (view_change.go)
+	viewChangeManager *ViewChangeManager
+
+	// 체크포인트 저장소 (seqNum -> digest)
+	checkpoints map[uint64][]byte
+
 	// 종료 컨텍스트
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -131,11 +137,21 @@ func NewEngine(config *Config, validatorSet *types.ValidatorSet, transport Trans
 		metrics:         m,
 		msgChan:         make(chan *Message, 1000),
 		requestChan:     make(chan *RequestMsg, 1000),
+		checkpoints:     make(map[uint64][]byte),
 		ctx:             ctx,
 		cancel:          cancel,
 		logger:          log.Default(),
 		committedBlocks: make([]*types.Block, 0),
 	}
+
+	// ViewChangeManager 초기화
+	engine.viewChangeManager = NewViewChangeManager(config.NodeID, validatorSet.QuorumSize())
+
+	// ViewChangeManager에 브로드캐스트 함수 연결
+	engine.viewChangeManager.SetBroadcastFunc(engine.broadcast)
+
+	// ViewChange 완료 시 콜백 설정
+	engine.viewChangeManager.SetOnViewChangeComplete(engine.onViewChangeComplete)
 
 	// Set message handler
 	if transport != nil {
@@ -143,6 +159,28 @@ func NewEngine(config *Config, validatorSet *types.ValidatorSet, transport Trans
 	}
 
 	return engine
+}
+
+// onViewChangeComplete - 뷰 체인지 완료 시 호출되는 콜백
+func (e *Engine) onViewChangeComplete(newView uint64) {
+	e.mu.Lock()
+	e.view = newView
+	e.mu.Unlock()
+
+	e.logger.Printf("[PBFT] View change completed. New view: %d", newView)
+
+	// 메트릭 업데이트
+	if e.metrics != nil {
+		e.metrics.SetCurrentView(newView)
+	}
+
+	// 타이머 리셋
+	e.resetViewChangeTimer()
+
+	// 내가 새 리더면 대기 중인 요청 처리
+	if e.isPrimary() {
+		e.logger.Printf("[PBFT] I am the new primary for view %d", newView)
+	}
 }
 
 // PBFT 컨센서스 엔진 시작
@@ -212,6 +250,7 @@ func (e *Engine) handleMessage(msg *Message) {
 		}
 	}()
 
+	// 메세지 타입별 분기
 	switch msg.Type {
 	case PrePrepare:
 		e.handlePrePrepare(msg)
@@ -228,11 +267,12 @@ func (e *Engine) handleMessage(msg *Message) {
 	}
 }
 
-// isPrimary checks if this node is the primary for the current view.
+// 리더 확인
 func (e *Engine) isPrimary() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
+	// View % 노드수 = 리더 인덱스
 	primaryIdx := int(e.view) % len(e.validatorSet.Validators)
 	return e.validatorSet.Validators[primaryIdx].ID == e.config.NodeID
 }
@@ -246,27 +286,29 @@ func (e *Engine) getPrimaryID() string {
 	return e.validatorSet.Validators[primaryIdx].ID
 }
 
-// proposeBlock proposes a new block (primary only).
+// 리더가 블록제안
 func (e *Engine) proposeBlock(req *RequestMsg) {
 	e.mu.Lock()
 	e.sequenceNum++
+	// 블록높이 ++ 
 	seqNum := e.sequenceNum
+	// 리더 저장
 	view := e.view
 	e.mu.Unlock()
 
-	// Check if sequence number is within window
+	// 블록 높이가 윈도우에 있는지 체크
 	if !e.stateLog.IsInWindow(seqNum) {
 		e.logger.Printf("[PBFT] Sequence number %d out of window", seqNum)
 		return
 	}
 
-	// Get pending transactions
+	// 트랜잭션 수집
 	var txs []types.Transaction
 	if e.app != nil {
 		txs = e.app.GetPendingTransactions()
 	}
 
-	// If we have a request, add it as a transaction
+	// 요청이 있으면 트랜잭션으로 추가
 	if req != nil {
 		txs = append(txs, types.Transaction{
 			ID:        fmt.Sprintf("tx-%d", time.Now().UnixNano()),
@@ -276,14 +318,14 @@ func (e *Engine) proposeBlock(req *RequestMsg) {
 		})
 	}
 
-	// Create new block
+	// 블록 생성
 	var prevHash []byte
 	if len(e.committedBlocks) > 0 {
 		prevHash = e.committedBlocks[len(e.committedBlocks)-1].Hash
 	}
 	block := types.NewBlock(seqNum, prevHash, e.config.NodeID, view, txs)
 
-	// Validate block
+	// 블록 검증
 	if e.app != nil {
 		if err := e.app.ValidateBlock(block); err != nil {
 			e.logger.Printf("[PBFT] Block validation failed: %v", err)
@@ -291,19 +333,18 @@ func (e *Engine) proposeBlock(req *RequestMsg) {
 		}
 	}
 
-	// Create pre-prepare message
+	//투표준비됨 메시지 생성
 	prePrepareMsg := NewPrePrepareMsg(view, seqNum, block, e.config.NodeID)
 
-	// Store in state log
+	// StateLog에 저장
 	state := e.stateLog.GetState(view, seqNum)
 	state.SetPrePrepare(prePrepareMsg, block)
 
-	// Create network message
+	// 네트워크 메시지 생성 및 브로드캐스트
 	payload, _ := json.Marshal(prePrepareMsg)
 	msg := NewMessage(PrePrepare, view, seqNum, block.Hash, e.config.NodeID)
 	msg.Payload = payload
 
-	// Broadcast pre-prepare
 	e.broadcast(msg)
 
 	e.logger.Printf("[PBFT] Primary broadcast PRE-PREPARE for seq %d", seqNum)
@@ -313,15 +354,15 @@ func (e *Engine) proposeBlock(req *RequestMsg) {
 	}
 }
 
-// handlePrePrepare handles a pre-prepare message.
+// 다른 노드가 받음
 func (e *Engine) handlePrePrepare(msg *Message) {
-	// Verify sender is the primary
+	// 리더가 보낸건지 확인
 	if msg.NodeID != e.getPrimaryID() {
 		e.logger.Printf("[PBFT] Received PRE-PREPARE from non-primary %s", msg.NodeID)
 		return
 	}
 
-	// Verify view number
+	// 뷰 번호 확인
 	e.mu.RLock()
 	currentView := e.view
 	e.mu.RUnlock()
@@ -331,20 +372,20 @@ func (e *Engine) handlePrePrepare(msg *Message) {
 		return
 	}
 
-	// Check if sequence number is within window
+	// 윈도우 체크
 	if !e.stateLog.IsInWindow(msg.SequenceNum) {
 		e.logger.Printf("[PBFT] PRE-PREPARE seq %d out of window", msg.SequenceNum)
 		return
 	}
 
-	// Decode pre-prepare message
+	// 디코딩함 메시지를
 	var prePrepareMsg PrePrepareMsg
 	if err := json.Unmarshal(msg.Payload, &prePrepareMsg); err != nil {
 		e.logger.Printf("[PBFT] Failed to decode PRE-PREPARE: %v", err)
 		return
 	}
 
-	// Validate block
+	// 블록 검증
 	if e.app != nil {
 		if err := e.app.ValidateBlock(prePrepareMsg.Block); err != nil {
 			e.logger.Printf("[PBFT] Block validation failed: %v", err)
@@ -352,11 +393,11 @@ func (e *Engine) handlePrePrepare(msg *Message) {
 		}
 	}
 
-	// Store in state log
+	// StateLog에 저장
 	state := e.stateLog.GetState(msg.View, msg.SequenceNum)
 	state.SetPrePrepare(&prePrepareMsg, prePrepareMsg.Block)
 
-	// Send prepare message
+	// Prepare 메시지 생성 및 브로드 캐스트
 	prepareMsg := NewPrepareMsg(msg.View, msg.SequenceNum, msg.Digest, e.config.NodeID)
 	payload, _ := json.Marshal(prepareMsg)
 	prepareNetMsg := NewMessage(Prepare, msg.View, msg.SequenceNum, msg.Digest, e.config.NodeID)
@@ -370,9 +411,9 @@ func (e *Engine) handlePrePrepare(msg *Message) {
 	e.logger.Printf("[PBFT] Node %s sent PREPARE for seq %d", e.config.NodeID, msg.SequenceNum)
 }
 
-// handlePrepare handles a prepare message.
+// 투표
 func (e *Engine) handlePrepare(msg *Message) {
-	// Verify view number
+	// 뷰 번호 확인
 	e.mu.RLock()
 	currentView := e.view
 	e.mu.RUnlock()
@@ -381,26 +422,26 @@ func (e *Engine) handlePrepare(msg *Message) {
 		return
 	}
 
-	// Decode prepare message
+	// 메시지 디코딩
 	var prepareMsg PrepareMsg
 	if err := json.Unmarshal(msg.Payload, &prepareMsg); err != nil {
 		e.logger.Printf("[PBFT] Failed to decode PREPARE: %v", err)
 		return
 	}
 
-	// Get state
+	// State 가져오기
 	state := e.stateLog.GetExistingState(msg.SequenceNum)
 	if state == nil {
 		return
 	}
 
-	// Verify digest matches pre-prepare
+	// Digest 확인 (같은 블록에 대한 건지)
 	if state.PrePrepareMsg == nil || !bytes.Equal(state.PrePrepareMsg.Digest, msg.Digest) {
 		e.logger.Printf("[PBFT] PREPARE digest mismatch for seq %d", msg.SequenceNum)
 		return
 	}
 
-	// Add prepare message
+	// quorum(2f+1) 확인
 	state.AddPrepare(&prepareMsg)
 
 	// Check if we have 2f+1 prepares (quorum)
@@ -509,6 +550,25 @@ func (e *Engine) executeBlock(state *State) {
 
 // createCheckpoint creates a stable checkpoint.
 func (e *Engine) createCheckpoint(seqNum uint64) {
+	e.mu.Lock()
+	// 체크포인트 저장
+	if len(e.committedBlocks) > 0 {
+		lastBlock := e.committedBlocks[len(e.committedBlocks)-1]
+		e.checkpoints[seqNum] = lastBlock.Hash
+	}
+
+	// 오래된 체크포인트 정리 (최근 3개만 유지)
+	if len(e.checkpoints) > 3 {
+		var oldestSeq uint64 = seqNum
+		for s := range e.checkpoints {
+			if s < oldestSeq {
+				oldestSeq = s
+			}
+		}
+		delete(e.checkpoints, oldestSeq)
+	}
+	e.mu.Unlock()
+
 	// Advance water marks
 	e.stateLog.AdvanceWatermarks(seqNum)
 
@@ -516,30 +576,225 @@ func (e *Engine) createCheckpoint(seqNum uint64) {
 }
 
 // handleViewChange handles a view change message.
+// 다른 노드가 보낸 ViewChange 메시지를 처리
 func (e *Engine) handleViewChange(msg *Message) {
-	// TODO: Implement view change logic
 	e.logger.Printf("[PBFT] Received VIEW-CHANGE from %s for view %d", msg.NodeID, msg.View)
+
+	// 메시지 디코딩
+	var viewChangeMsg ViewChangeMsg
+	if err := json.Unmarshal(msg.Payload, &viewChangeMsg); err != nil {
+		e.logger.Printf("[PBFT] Failed to decode VIEW-CHANGE: %v", err)
+		return
+	}
+
+	// 현재 뷰보다 높은 뷰에 대한 것만 처리
+	e.mu.RLock()
+	currentView := e.view
+	e.mu.RUnlock()
+
+	if viewChangeMsg.NewView <= currentView {
+		e.logger.Printf("[PBFT] Ignoring VIEW-CHANGE for old view %d (current: %d)",
+			viewChangeMsg.NewView, currentView)
+		return
+	}
+
+	// ViewChangeManager에 전달
+	hasQuorum := e.viewChangeManager.HandleViewChange(&viewChangeMsg)
+
+	if hasQuorum {
+		e.logger.Printf("[PBFT] Got quorum for view %d", viewChangeMsg.NewView)
+
+		// 내가 새 뷰의 리더인지 확인
+		newPrimaryIdx := int(viewChangeMsg.NewView) % len(e.validatorSet.Validators)
+		newPrimaryID := e.validatorSet.Validators[newPrimaryIdx].ID
+
+		if newPrimaryID == e.config.NodeID {
+			// 내가 새 리더 -> NewView 메시지 생성 및 브로드캐스트
+			e.broadcastNewView(viewChangeMsg.NewView)
+		}
+	}
 }
 
 // handleNewView handles a new view message.
+// 새 리더가 보낸 NewView 메시지를 처리
 func (e *Engine) handleNewView(msg *Message) {
-	// TODO: Implement new view logic
 	e.logger.Printf("[PBFT] Received NEW-VIEW from %s for view %d", msg.NodeID, msg.View)
+
+	// 메시지 디코딩
+	var newViewMsg NewViewMsg
+	if err := json.Unmarshal(msg.Payload, &newViewMsg); err != nil {
+		e.logger.Printf("[PBFT] Failed to decode NEW-VIEW: %v", err)
+		return
+	}
+
+	// 현재 뷰보다 높은 뷰에 대한 것만 처리
+	e.mu.RLock()
+	currentView := e.view
+	e.mu.RUnlock()
+
+	if newViewMsg.View <= currentView {
+		e.logger.Printf("[PBFT] Ignoring NEW-VIEW for old view %d (current: %d)",
+			newViewMsg.View, currentView)
+		return
+	}
+
+	// 새 리더가 맞는지 확인
+	expectedPrimaryIdx := int(newViewMsg.View) % len(e.validatorSet.Validators)
+	expectedPrimaryID := e.validatorSet.Validators[expectedPrimaryIdx].ID
+
+	if newViewMsg.NewPrimaryID != expectedPrimaryID {
+		e.logger.Printf("[PBFT] NEW-VIEW from wrong primary: got %s, expected %s",
+			newViewMsg.NewPrimaryID, expectedPrimaryID)
+		return
+	}
+
+	// ViewChangeManager에서 검증 및 처리
+	if e.viewChangeManager.HandleNewView(&newViewMsg) {
+		e.logger.Printf("[PBFT] NEW-VIEW accepted for view %d", newViewMsg.View)
+
+		// 뷰 업데이트 (콜백에서 처리됨)
+
+		// NewView에 포함된 PrePrepare 메시지들 처리
+		// (이전 뷰에서 Prepared 상태였던 블록들)
+		for _, prePrepare := range newViewMsg.PrePrepareMsgs {
+			e.reprocessPrePrepare(&prePrepare, newViewMsg.View)
+		}
+	} else {
+		e.logger.Printf("[PBFT] NEW-VIEW rejected for view %d", newViewMsg.View)
+	}
+}
+
+// reprocessPrePrepare - 뷰 체인지 후 이전 PrePrepare 재처리
+func (e *Engine) reprocessPrePrepare(prePrepare *PrePrepareMsg, newView uint64) {
+	// 새 뷰 번호로 업데이트
+	prePrepare.View = newView
+
+	// StateLog에 저장
+	state := e.stateLog.GetState(newView, prePrepare.SequenceNum)
+	state.SetPrePrepare(prePrepare, prePrepare.Block)
+
+	// Prepare 메시지 브로드캐스트
+	prepareMsg := NewPrepareMsg(newView, prePrepare.SequenceNum, prePrepare.Digest, e.config.NodeID)
+	payload, _ := json.Marshal(prepareMsg)
+	prepareNetMsg := NewMessage(Prepare, newView, prePrepare.SequenceNum, prePrepare.Digest, e.config.NodeID)
+	prepareNetMsg.Payload = payload
+
+	e.broadcast(prepareNetMsg)
+
+	e.logger.Printf("[PBFT] Reprocessed PRE-PREPARE for seq %d in new view %d",
+		prePrepare.SequenceNum, newView)
+}
+
+// broadcastNewView - 새 리더가 NewView 메시지 브로드캐스트
+func (e *Engine) broadcastNewView(newView uint64) {
+	// NewView 메시지 생성
+	newViewMsg := e.viewChangeManager.CreateNewViewMsg(newView, len(e.validatorSet.Validators))
+	if newViewMsg == nil {
+		e.logger.Printf("[PBFT] Failed to create NEW-VIEW message")
+		return
+	}
+
+	// 브로드캐스트
+	payload, _ := json.Marshal(newViewMsg)
+	msg := NewMessage(NewView, newView, e.sequenceNum, nil, e.config.NodeID)
+	msg.Payload = payload
+
+	e.broadcast(msg)
+
+	// 자신도 NewView 처리
+	e.viewChangeManager.HandleNewView(newViewMsg)
+
+	e.logger.Printf("[PBFT] Broadcast NEW-VIEW for view %d", newView)
 }
 
 // startViewChange initiates a view change.
+// 타임아웃 시 호출되어 뷰 체인지 시작
 func (e *Engine) startViewChange() {
 	e.mu.Lock()
 	newView := e.view + 1
+	lastSeqNum := e.sequenceNum
 	e.mu.Unlock()
 
-	e.logger.Printf("[PBFT] Starting view change to view %d", newView)
+	e.logger.Printf("[PBFT] Starting view change to view %d (timeout)", newView)
 
 	if e.metrics != nil {
 		e.metrics.IncrementViewChanges()
 	}
 
-	// TODO: Implement full view change protocol
+	// 체크포인트 수집
+	checkpoints := e.collectCheckpoints()
+
+	// Prepared 상태인 블록들 수집
+	preparedSet := e.collectPreparedCertificates()
+
+	// ViewChangeManager를 통해 ViewChange 메시지 브로드캐스트
+	e.viewChangeManager.StartViewChange(newView, lastSeqNum, checkpoints, preparedSet)
+
+	// 타이머 재시작 (더 긴 타임아웃으로)
+	// 뷰 체인지가 반복되면 타임아웃을 점점 늘림 (exponential backoff)
+	e.mu.Lock()
+	e.viewChangeTimer = time.AfterFunc(e.config.ViewChangeTimeout*2, func() {
+		e.startViewChange()
+	})
+	e.mu.Unlock()
+}
+
+// collectCheckpoints - 저장된 체크포인트들 수집
+func (e *Engine) collectCheckpoints() []Checkpoint {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	var checkpoints []Checkpoint
+	for seqNum, digest := range e.checkpoints {
+		checkpoints = append(checkpoints, Checkpoint{
+			SequenceNum: seqNum,
+			Digest:      digest,
+			NodeID:      e.config.NodeID,
+		})
+	}
+	return checkpoints
+}
+
+// collectPreparedCertificates - Prepared 상태인 블록들의 인증서 수집
+func (e *Engine) collectPreparedCertificates() []PreparedCert {
+	quorum := e.validatorSet.QuorumSize()
+	var preparedCerts []PreparedCert
+
+	// StateLog에서 Prepared 상태인 것들 찾기
+	e.mu.RLock()
+	view := e.view
+	e.mu.RUnlock()
+
+	// 현재 윈도우 내의 상태들 검사
+	for seqNum := e.stateLog.LowWaterMark + 1; seqNum <= e.stateLog.HighWaterMark; seqNum++ {
+		state := e.stateLog.GetExistingState(seqNum)
+		if state == nil {
+			continue
+		}
+
+		// Prepared 상태이고 아직 실행되지 않은 것
+		if state.IsPrepared(quorum) && !state.Executed && state.PrePrepareMsg != nil {
+			// Prepare 메시지들 수집
+			var prepares []PrepareMsg
+			for _, p := range state.PrepareMsgs {
+				prepares = append(prepares, *p)
+			}
+
+			cert := PreparedCert{
+				PrePrepare: PrePrepareMsg{
+					View:        view,
+					SequenceNum: seqNum,
+					Digest:      state.PrePrepareMsg.Digest,
+					Block:       state.Block,
+					PrimaryID:   state.PrePrepareMsg.PrimaryID,
+				},
+				Prepares: prepares,
+			}
+			preparedCerts = append(preparedCerts, cert)
+		}
+	}
+
+	return preparedCerts
 }
 
 // resetViewChangeTimer resets the view change timer.
