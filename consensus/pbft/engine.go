@@ -444,7 +444,7 @@ func (e *Engine) handlePrepare(msg *Message) {
 	// quorum(2f+1) 확인
 	state.AddPrepare(&prepareMsg)
 
-	// Check if we have 2f+1 prepares (quorum)
+	// Commit 전송
 	quorum := e.validatorSet.QuorumSize()
 	if state.IsPrepared(quorum) && state.GetPhase() == PrePrepared {
 		state.TransitionToPrepared()
@@ -462,9 +462,9 @@ func (e *Engine) handlePrepare(msg *Message) {
 	}
 }
 
-// handleCommit handles a commit message.
+// 최종 확정
 func (e *Engine) handleCommit(msg *Message) {
-	// Verify view number
+	//뷰번호 확인
 	e.mu.RLock()
 	currentView := e.view
 	e.mu.RUnlock()
@@ -473,23 +473,23 @@ func (e *Engine) handleCommit(msg *Message) {
 		return
 	}
 
-	// Decode commit message
+	// 메시지 디코딩
 	var commitMsg CommitMsg
 	if err := json.Unmarshal(msg.Payload, &commitMsg); err != nil {
 		e.logger.Printf("[PBFT] Failed to decode COMMIT: %v", err)
 		return
 	}
 
-	// Get state
+	// State 가져오기
 	state := e.stateLog.GetExistingState(msg.SequenceNum)
 	if state == nil {
 		return
 	}
 
-	// Add commit message
+	// Commit 추가
 	state.AddCommit(&commitMsg)
 
-	// Check if we have 2f+1 commits (quorum)
+	// quorum 확인 -> 블록 실행
 	quorum := e.validatorSet.QuorumSize()
 	if state.IsCommitted(quorum) && state.GetPhase() == Prepared {
 		state.TransitionToCommitted()
@@ -582,6 +582,7 @@ func (e *Engine) handleViewChange(msg *Message) {
 
 	// 메시지 디코딩
 	var viewChangeMsg ViewChangeMsg
+	// 여기서 msg.Payload를 -> viewChangeMsg에 적용
 	if err := json.Unmarshal(msg.Payload, &viewChangeMsg); err != nil {
 		e.logger.Printf("[PBFT] Failed to decode VIEW-CHANGE: %v", err)
 		return

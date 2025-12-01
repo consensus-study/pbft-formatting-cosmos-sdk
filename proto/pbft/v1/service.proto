@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package pbft.v1;
+
+option go_package = "github.com/ahwlsqja/pbft-cosmos/api/pbft/v1";
+
+import "pbft/v1/types.proto";
+
+// PBFT 노드 간 P2P 통신 서비스
+service PBFTService {
+    // 메시지 브로드캐스트
+    rpc BroadcastMessage(BroadcastMessageRequest) returns (BroadcastMessageResponse);
+
+    // 특정 노드에 메시지 전송
+    rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+
+    // 양방향 메시지 스트림
+    rpc MessageStream(stream PBFTMessage) returns (stream PBFTMessage);
+
+    // 상태 동기화
+    rpc SyncState(SyncStateRequest) returns (SyncStateResponse);
+
+    // 체크포인트 요청
+    rpc GetCheckpoint(GetCheckpointRequest) returns (GetCheckpointResponse);
+
+    // 노드 상태 조회
+    rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+}
+
+message BroadcastMessageRequest {
+    PBFTMessage message = 1;
+}
+
+message BroadcastMessageResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message SendMessageRequest {
+    string target_node_id = 1;
+    PBFTMessage message = 2;
+}
+
+message SendMessageResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message SyncStateRequest {
+    uint64 from_height = 1;
+    uint64 to_height = 2;
+}
+
+message SyncStateResponse {
+    repeated Block blocks = 1;
+    repeated Checkpoint checkpoints = 2;
+}
+
+message GetCheckpointRequest {
+    uint64 sequence_num = 1;
+}
+
+message GetCheckpointResponse {
+    Checkpoint checkpoint = 1;
+    bytes state_hash = 2;
+}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+    string node_id = 1;
+    uint64 current_view = 2;
+    uint64 current_height = 3;
+    bytes last_app_hash = 4;
+    int32 peer_count = 5;
+    bool is_primary = 6;
+}

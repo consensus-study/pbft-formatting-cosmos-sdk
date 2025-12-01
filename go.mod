@@ -2,7 +2,15 @@ module github.com/ahwlsqja/pbft-cosmos
 
 go 1.23.4
 
-require github.com/prometheus/client_golang v1.23.2
+require (
+	github.com/cometbft/cometbft v0.38.17
+	github.com/prometheus/client_golang v1.23.2
+	github.com/spf13/cobra v1.8.1
+	github.com/spf13/viper v1.19.0
+	cosmossdk.io/log v1.5.1
+	cosmossdk.io/math v1.5.3
+	google.golang.org/grpc v1.68.0
+)
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect

@@ -1,0 +1,124 @@
+syntax = "proto3";
+
+package pbft.v1;
+
+option go_package = "github.com/ahwlsqja/pbft-cosmos/api/pbft/v1";
+
+import "google/protobuf/timestamp.proto";
+
+// 메시지 타입
+enum MessageType {
+    MESSAGE_TYPE_UNSPECIFIED = 0;
+    MESSAGE_TYPE_PRE_PREPARE = 1;
+    MESSAGE_TYPE_PREPARE = 2;
+    MESSAGE_TYPE_COMMIT = 3;
+    MESSAGE_TYPE_VIEW_CHANGE = 4;
+    MESSAGE_TYPE_NEW_VIEW = 5;
+    MESSAGE_TYPE_CHECKPOINT = 6;
+}
+
+// 기본 PBFT 메시지 (네트워크 전송용)
+message PBFTMessage {
+    MessageType type = 1;
+    uint64 view = 2;
+    uint64 sequence_num = 3;
+    bytes digest = 4;
+    string node_id = 5;
+    google.protobuf.Timestamp timestamp = 6;
+    bytes signature = 7;
+    bytes payload = 8;  // 실제 메시지 데이터
+}
+
+// PrePrepare 메시지
+message PrePrepareMsg {
+    uint64 view = 1;
+    uint64 sequence_num = 2;
+    bytes digest = 3;
+    bytes block_data = 4;  // 직렬화된 블록
+    string primary_id = 5;
+}
+
+// Prepare 메시지
+message PrepareMsg {
+    uint64 view = 1;
+    uint64 sequence_num = 2;
+    bytes digest = 3;
+    string node_id = 4;
+}
+
+// Commit 메시지
+message CommitMsg {
+    uint64 view = 1;
+    uint64 sequence_num = 2;
+    bytes digest = 3;
+    string node_id = 4;
+}
+
+// ViewChange 메시지
+message ViewChangeMsg {
+    uint64 new_view = 1;
+    uint64 last_seq_num = 2;
+    repeated Checkpoint checkpoints = 3;
+    repeated PreparedCert prepared_set = 4;
+    string node_id = 5;
+}
+
+// NewView 메시지
+message NewViewMsg {
+    uint64 view = 1;
+    repeated ViewChangeMsg view_change_msgs = 2;
+    repeated PrePrepareMsg pre_prepare_msgs = 3;
+    string new_primary_id = 4;
+}
+
+// 체크포인트
+message Checkpoint {
+    uint64 sequence_num = 1;
+    bytes digest = 2;
+    string node_id = 3;
+}
+
+// Prepared 인증서
+message PreparedCert {
+    PrePrepareMsg pre_prepare = 1;
+    repeated PrepareMsg prepares = 2;
+}
+
+// 블록 헤더
+message BlockHeader {
+    uint64 height = 1;
+    google.protobuf.Timestamp timestamp = 2;
+    bytes prev_hash = 3;
+    bytes tx_hash = 4;
+    bytes state_hash = 5;
+    string proposer = 6;
+    uint64 view = 7;
+}
+
+// 블록
+message Block {
+    BlockHeader header = 1;
+    repeated bytes txs = 2;
+    bytes hash = 3;
+}
+
+// 트랜잭션
+message Transaction {
+    string id = 1;
+    bytes data = 2;
+    google.protobuf.Timestamp timestamp = 3;
+    bytes signature = 4;
+    string from = 5;
+}
+
+// 검증자
+message Validator {
+    string id = 1;
+    bytes pub_key = 2;
+    int64 voting_power = 3;
+}
+
+// 검증자 집합
+message ValidatorSet {
+    repeated Validator validators = 1;
+}

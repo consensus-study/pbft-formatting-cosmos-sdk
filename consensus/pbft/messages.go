@@ -23,8 +23,8 @@ const (
 	ViewChange
 	// NewView is sent by the new primary after view change.
 	NewView
-	// Checkpoint is sent for garbage collection.
-	Checkpoint
+	// CheckpointMsgType is sent for garbage collection.
+	CheckpointMsgType
 	// Request is a client request.
 	Request
 	// Reply is a response to a client request.
@@ -44,7 +44,7 @@ func (mt MessageType) String() string {
 		return "VIEW-CHANGE"
 	case NewView:
 		return "NEW-VIEW"
-	case Checkpoint:
+	case CheckpointMsgType:
 		return "CHECKPOINT"
 	case Request:
 		return "REQUEST"
