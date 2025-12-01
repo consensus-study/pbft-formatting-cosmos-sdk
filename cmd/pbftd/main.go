@@ -2,8 +2,8 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -12,87 +12,145 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ahwlsqja/pbft-cosmos/abci"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+
 	"github.com/ahwlsqja/pbft-cosmos/consensus/pbft"
-	"github.com/ahwlsqja/pbft-cosmos/crypto"
-	"github.com/ahwlsqja/pbft-cosmos/metrics"
-	"github.com/ahwlsqja/pbft-cosmos/network"
-	"github.com/ahwlsqja/pbft-cosmos/types"
+	"github.com/ahwlsqja/pbft-cosmos/node"
 )
 
-var (
-	nodeID      = flag.String("node-id", "", "Unique node identifier")
-	listenAddr  = flag.String("listen", ":26656", "P2P listen address")
-	metricsAddr = flag.String("metrics", ":26660", "Prometheus metrics address")
-	peers       = flag.String("peers", "", "Comma-separated list of peer addresses (id@host:port)")
-	benchmark   = flag.Bool("benchmark", false, "Run benchmark mode")
-	txCount     = flag.Int("tx-count", 1000, "Number of transactions for benchmark")
-)
+var rootCmd = &cobra.Command{
+	Use:   "pbftd",
+	Short: "PBFT consensus daemon for Cosmos SDK v0.53.0",
+	Long: `PBFT consensus daemon implementing Practical Byzantine Fault Tolerance
+for integration with Cosmos SDK v0.53.0 and CometBFT v0.38.x ABCI 2.0.
 
-func main() {
-	flag.Parse()
+This daemon can be used to run a PBFT consensus network either standalone
+or integrated with a Cosmos SDK application.`,
+}
+
+var startCmd = &cobra.Command{
+	Use:   "start",
+	Short: "Start the PBFT node",
+	Long:  `Start the PBFT consensus node and connect to the network.`,
+	RunE:  runStart,
+}
+
+var statusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Get node status",
+	RunE:  runStatus,
+}
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print version information",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Println("pbftd v0.1.0")
+		fmt.Println("PBFT Consensus for Cosmos SDK v0.53.0")
+		fmt.Println("Built with Go 1.22+")
+	},
+}
+
+func init() {
+	// Add commands
+	rootCmd.AddCommand(startCmd)
+	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(versionCmd)
+
+	// Start command flags
+	startCmd.Flags().String("node-id", "", "Unique node identifier (required)")
+	startCmd.Flags().String("chain-id", "pbft-chain", "Chain ID")
+	startCmd.Flags().String("listen", "0.0.0.0:26656", "P2P listen address")
+	startCmd.Flags().String("abci", "localhost:26658", "ABCI application address")
+	startCmd.Flags().StringSlice("peers", []string{}, "Peer addresses (format: nodeID@address)")
+	startCmd.Flags().String("metrics", "0.0.0.0:26660", "Prometheus metrics address")
+	startCmd.Flags().Bool("metrics-enabled", true, "Enable Prometheus metrics")
+	startCmd.Flags().Duration("request-timeout", 5*time.Second, "Request timeout")
+	startCmd.Flags().Duration("view-change-timeout", 10*time.Second, "View change timeout")
+	startCmd.Flags().Uint64("checkpoint-interval", 100, "Checkpoint interval")
+	startCmd.Flags().Uint64("window-size", 200, "PBFT window size")
+	startCmd.Flags().String("validators", "", "Validator configuration JSON file")
+	startCmd.Flags().String("config", "", "Configuration file path")
+	startCmd.Flags().Bool("benchmark", false, "Run in benchmark mode")
+	startCmd.Flags().Int("benchmark-tx-count", 1000, "Number of transactions for benchmark")
+
+	// Bind flags to viper
+	viper.BindPFlags(startCmd.Flags())
+}
+
+func runStart(cmd *cobra.Command, args []string) error {
+	// Load config file if specified
+	configFile := viper.GetString("config")
+	if configFile != "" {
+		viper.SetConfigFile(configFile)
+		if err := viper.ReadInConfig(); err != nil {
+			return fmt.Errorf("failed to read config file: %w", err)
+		}
+	}
+
+	// Build configuration
+	config := &node.Config{
+		NodeID:             viper.GetString("node-id"),
+		ChainID:            viper.GetString("chain-id"),
+		ListenAddr:         viper.GetString("listen"),
+		ABCIAddr:           viper.GetString("abci"),
+		Peers:              viper.GetStringSlice("peers"),
+		RequestTimeout:     viper.GetDuration("request-timeout"),
+		ViewChangeTimeout:  viper.GetDuration("view-change-timeout"),
+		CheckpointInterval: viper.GetUint64("checkpoint-interval"),
+		WindowSize:         viper.GetUint64("window-size"),
+		MetricsEnabled:     viper.GetBool("metrics-enabled"),
+		MetricsAddr:        viper.GetString("metrics"),
+	}
 
 	// Validate node ID
-	if *nodeID == "" {
-		// Generate a random node ID
-		signer, err := crypto.NewDefaultSigner()
+	if config.NodeID == "" {
+		return fmt.Errorf("--node-id is required")
+	}
+
+	// Load validators from file or use defaults
+	validatorsFile := viper.GetString("validators")
+	if validatorsFile != "" {
+		validators, err := loadValidatorsFromFile(validatorsFile)
 		if err != nil {
-			log.Fatalf("Failed to generate signer: %v", err)
+			return fmt.Errorf("failed to load validators: %w", err)
 		}
-		*nodeID = signer.Address()[:8]
+		config.Validators = validators
+	} else {
+		// Default 4-node validator set for testing
+		config.Validators = createDefaultValidators()
 	}
 
-	log.Printf("Starting PBFT node: %s", *nodeID)
-
-	// Initialize metrics
-	m := metrics.NewMetrics("pbft")
-	metricsServer := metrics.NewServer(*metricsAddr)
-	if err := metricsServer.Start(); err != nil {
-		log.Fatalf("Failed to start metrics server: %v", err)
-	}
-	log.Printf("Metrics server listening on %s", *metricsAddr)
-
-	// Parse peers
-	peerConfigs := parsePeers(*peers)
-
-	// Create validator set
-	validatorSet := createValidatorSet(*nodeID, peerConfigs)
-
-	// Initialize transport
-	transportConfig := &network.TransportConfig{
-		NodeID:  *nodeID,
-		Address: *listenAddr,
-		Peers:   peerConfigs,
-	}
-	transport := network.NewTransport(transportConfig)
-
-	// Initialize application
-	app := abci.NewApplication()
-
-	// Initialize PBFT engine
-	engineConfig := pbft.DefaultConfig(*nodeID)
-	engine := pbft.NewEngine(engineConfig, validatorSet, transport, app, m)
-
-	// Start transport
-	if err := transport.Start(); err != nil {
-		log.Fatalf("Failed to start transport: %v", err)
+	// Create node
+	n, err := node.NewNode(config)
+	if err != nil {
+		return fmt.Errorf("failed to create node: %w", err)
 	}
 
-	// Connect to peers
-	for _, peer := range peerConfigs {
-		if err := transport.Connect(peer.ID, peer.Address); err != nil {
-			log.Printf("Failed to connect to peer %s: %v", peer.ID, err)
-		}
+	// Create context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start node
+	if err := n.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start node: %w", err)
 	}
 
-	// Start PBFT engine
-	if err := engine.Start(); err != nil {
-		log.Fatalf("Failed to start PBFT engine: %v", err)
-	}
+	// Print startup info
+	fmt.Println("========================================")
+	fmt.Printf("  PBFT Node Started\n")
+	fmt.Printf("  Node ID:    %s\n", config.NodeID)
+	fmt.Printf("  Chain ID:   %s\n", config.ChainID)
+	fmt.Printf("  P2P Addr:   %s\n", config.ListenAddr)
+	fmt.Printf("  ABCI Addr:  %s\n", config.ABCIAddr)
+	fmt.Printf("  Metrics:    %s\n", config.MetricsAddr)
+	fmt.Printf("  Validators: %d\n", len(config.Validators))
+	fmt.Println("========================================")
 
 	// Run benchmark if requested
-	if *benchmark {
-		go runBenchmark(engine, app, *txCount)
+	if viper.GetBool("benchmark") {
+		go runBenchmark(n, viper.GetInt("benchmark-tx-count"))
 	}
 
 	// Wait for interrupt signal
@@ -100,101 +158,98 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
-	log.Println("Shutting down...")
-
-	// Stop components
-	engine.Stop()
-	transport.Stop()
-	metricsServer.Stop()
-
-	log.Println("Shutdown complete")
+	fmt.Println("\nShutting down...")
+	return n.Stop()
 }
 
-func parsePeers(peersStr string) []network.PeerConfig {
-	if peersStr == "" {
-		return nil
-	}
-
-	var configs []network.PeerConfig
-	for _, peer := range strings.Split(peersStr, ",") {
-		peer = strings.TrimSpace(peer)
-		if peer == "" {
-			continue
-		}
-
-		parts := strings.Split(peer, "@")
-		if len(parts) != 2 {
-			log.Printf("Invalid peer format: %s (expected id@host:port)", peer)
-			continue
-		}
-
-		configs = append(configs, network.PeerConfig{
-			ID:      parts[0],
-			Address: parts[1],
-		})
-	}
-
-	return configs
+func runStatus(cmd *cobra.Command, args []string) error {
+	// This would typically connect to a running node
+	// For now, just print a placeholder
+	fmt.Println("Status: Not connected to node")
+	fmt.Println("Use 'pbftd start' to start a node")
+	return nil
 }
 
-func createValidatorSet(selfID string, peers []network.PeerConfig) *types.ValidatorSet {
-	validators := make([]*types.Validator, 0)
-
-	// Add self
-	validators = append(validators, &types.Validator{
-		ID:      selfID,
-		Address: *listenAddr,
-		Power:   1,
-	})
-
-	// Add peers
-	for _, peer := range peers {
-		validators = append(validators, &types.Validator{
-			ID:      peer.ID,
-			Address: peer.Address,
-			Power:   1,
-		})
+func loadValidatorsFromFile(path string) ([]*pbft.ValidatorInfo, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
 
-	return types.NewValidatorSet(validators)
+	var validators []*pbft.ValidatorInfo
+	if err := json.Unmarshal(data, &validators); err != nil {
+		return nil, err
+	}
+
+	return validators, nil
 }
 
-func runBenchmark(engine *pbft.Engine, app *abci.Application, txCount int) {
-	log.Printf("Starting benchmark with %d transactions...", txCount)
+func createDefaultValidators() []*pbft.ValidatorInfo {
+	// Default 4-node validator set for testing
+	return []*pbft.ValidatorInfo{
+		{ID: "node0", PubKey: []byte("pubkey0"), VotingPower: 10},
+		{ID: "node1", PubKey: []byte("pubkey1"), VotingPower: 10},
+		{ID: "node2", PubKey: []byte("pubkey2"), VotingPower: 10},
+		{ID: "node3", PubKey: []byte("pubkey3"), VotingPower: 10},
+	}
+}
+
+func runBenchmark(n *node.Node, txCount int) {
+	log.Printf("[Benchmark] Starting benchmark with %d transactions...", txCount)
 
 	// Wait for network to stabilize
-	time.Sleep(2 * time.Second)
+	time.Sleep(3 * time.Second)
 
 	startTime := time.Now()
 
 	// Submit transactions
 	for i := 0; i < txCount; i++ {
-		op := abci.Operation{
-			Type:  "set",
-			Key:   fmt.Sprintf("key-%d", i),
-			Value: fmt.Sprintf("value-%d", i),
-		}
-		data, _ := json.Marshal(op)
+		tx := fmt.Sprintf(`{"type":"set","key":"key-%d","value":"value-%d"}`, i, i)
 
-		if err := engine.SubmitRequest(data, "benchmark-client"); err != nil {
-			log.Printf("Failed to submit tx %d: %v", i, err)
+		if err := n.SubmitTx([]byte(tx), "benchmark-client"); err != nil {
+			log.Printf("[Benchmark] Failed to submit tx %d: %v", i, err)
 		}
 
 		// Small delay to avoid overwhelming
-		if i%100 == 0 {
+		if i > 0 && i%100 == 0 {
 			time.Sleep(10 * time.Millisecond)
+			log.Printf("[Benchmark] Submitted %d transactions", i)
 		}
 	}
 
-	// Wait for all transactions to be processed
+	// Wait for transactions to be processed
 	time.Sleep(5 * time.Second)
 
 	elapsed := time.Since(startTime)
 	tps := float64(txCount) / elapsed.Seconds()
 
-	log.Printf("Benchmark complete!")
-	log.Printf("  Total transactions: %d", txCount)
-	log.Printf("  Total time: %v", elapsed)
-	log.Printf("  TPS: %.2f", tps)
-	log.Printf("  Final height: %d", engine.GetCurrentHeight())
+	log.Println("[Benchmark] ========================================")
+	log.Printf("[Benchmark] Total transactions: %d", txCount)
+	log.Printf("[Benchmark] Total time: %v", elapsed)
+	log.Printf("[Benchmark] TPS: %.2f", tps)
+	log.Printf("[Benchmark] Final height: %d", n.GetHeight())
+	log.Println("[Benchmark] ========================================")
+}
+
+func main() {
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// Helper function for parsing peers (for backwards compatibility)
+func parsePeers(peersStr string) []string {
+	if peersStr == "" {
+		return nil
+	}
+
+	var peers []string
+	for _, peer := range strings.Split(peersStr, ",") {
+		peer = strings.TrimSpace(peer)
+		if peer != "" {
+			peers = append(peers, peer)
+		}
+	}
+	return peers
 }
