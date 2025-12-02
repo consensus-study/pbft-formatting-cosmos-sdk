@@ -9,39 +9,39 @@ import (
 
 // ExecutionResult - 블록 실행 결과
 type ExecutionResult struct {
-	TxResults             []TxResult
-	ValidatorUpdates      []abci.ValidatorUpdate
-	ConsensusParamUpdates *abci.ConsensusParams
-	AppHash               []byte
-	Events                []abci.Event
-}
+	TxResults             []TxResult // 트랜잭션 결과들
+	ValidatorUpdates      []abci.ValidatorUpdate // 검증자
+	ConsensusParamUpdates *abci.ConsensusParams // 합의 파라미터
+	AppHash               []byte // 앱 해시
+	Events                []abci.Event // 이벤트들
+} 
 
 // TxResult - 트랜잭션 실행 결과
 type TxResult struct {
-	Code      uint32
-	Data      []byte
-	Log       string
-	Info      string
-	GasWanted int64
-	GasUsed   int64
-	Events    []abci.Event
+	Code      uint32 // 트랜잭션 성공 실패
+	Data      []byte // 반환 데이터
+	Log       string // 로그 메시지
+	Info      string // 추가 정보
+	GasWanted int64 // 요청 가스
+	GasUsed   int64 // 사용 가스
+	Events    []abci.Event // 이벤트들
 }
 
 // QueryResult - 쿼리 결과
 type QueryResult struct {
-	Key      []byte
-	Value    []byte
-	Height   int64
-	ProofOps *abci.ProofOps
+	Key      []byte // 키
+	Value    []byte // 값
+	Height   int64 // 높이
+	ProofOps *abci.ProofOps // 증명 정보
 }
 
 // BlockData - PBFT 블록 데이터 (ABCI 변환용)
 type BlockData struct {
-	Height       int64
-	Txs          [][]byte
-	Hash         []byte
-	Time         time.Time
-	ProposerAddr []byte
+	Height       int64 // 블록 높이
+	Txs          [][]byte // 트랜잭션들
+	Hash         []byte // 블록 해시
+	Time         time.Time // 타임스탬프
+	ProposerAddr []byte // 제안자 주소
 }
 
 // NewPrepareProposalRequest - PrepareProposal 요청 생성
@@ -121,8 +121,8 @@ func FinalizeBlockResponseToResult(resp *abci.ResponseFinalizeBlock) *ExecutionR
 
 // ValidatorUpdate - 검증자 업데이트 헬퍼
 type ValidatorUpdate struct {
-	PubKey []byte
-	Power  int64
+	PubKey []byte // 공개키
+	Power  int64 // 투표력
 }
 
 // ToABCIValidatorUpdate - ABCI ValidatorUpdate로 변환

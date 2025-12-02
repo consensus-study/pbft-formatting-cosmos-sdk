@@ -20,11 +20,11 @@ type ABCIAdapter struct {
 	client *abciclient.Client // ABCI 클라이언트
 
 	// 현재 상태
-	lastHeight  int64 // 마지막 높이
+	lastHeight  int64 // 마지막 커밋된 높이
 	lastAppHash []byte // 마지막 앱 해시
 
 	// 설정
-	maxTxBytes int64 // 최대 트랜잭션 크기
+	maxTxBytes int64 // 최대 트랜잭션 크기 (기본1MB)
 	chainID    string // 체인 ID
 }
 
@@ -261,35 +261,35 @@ func (a *ABCIAdapter) SetMaxTxBytes(maxBytes int64) {
 
 // ABCIExecutionResult - 블록 실행 결과
 type ABCIExecutionResult struct {
-	TxResults        []ABCITxResult
-	ValidatorUpdates []abci.ValidatorUpdate
-	AppHash          []byte
-	Events           []abci.Event
+	TxResults        []ABCITxResult // 각 트랜잭션 실행 결과들
+	ValidatorUpdates []abci.ValidatorUpdate //  검증자 변경사항
+	AppHash          []byte // 새 앱 상태 해시 머클 루트임
+	Events           []abci.Event // 발생한 이벤트들
 }
 
 // ABCITxResult - 트랜잭션 실행 결과
 type ABCITxResult struct {
-	Code      uint32
-	Data      []byte
-	Log       string
-	Info      string
-	GasWanted int64
-	GasUsed   int64
+	Code      uint32 // 결과 코드 (0=성공)
+	Data      []byte // 반환 데이터
+	Log       string // 로그 메시지
+	Info      string // 추가 정보
+	GasWanted int64 // 요청 가스
+	GasUsed   int64 // 사용 가스
 }
 
 // ABCIQueryResult - 쿼리 결과
 type ABCIQueryResult struct {
-	Key    []byte
-	Value  []byte
-	Height int64
+	Key    []byte // 쿼리 키
+	Value  []byte // 결과 값
+	Height int64 // 쿼리 높이
 }
 
 // ABCIInfo - 앱 정보
 type ABCIInfo struct {
-	Version          string
-	AppVersion       uint64
-	LastBlockHeight  int64
-	LastBlockAppHash []byte
+	Version          string // 앱 버전
+	AppVersion       uint64 // 앱 버전 번호
+	LastBlockHeight  int64 // 마지막 블록 높이
+	LastBlockAppHash []byte // 마지막 앱 해시
 }
 
 // convertTxResults - 트랜잭션 결과 변환

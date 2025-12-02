@@ -15,22 +15,22 @@ import (
 // Client - ABCI 클라이언트 (PBFT 엔진 → Cosmos SDK 앱 통신)
 type Client struct {
 	mu     sync.RWMutex
-	conn   *grpc.ClientConn
-	client abci.ABCIClient
+	conn   *grpc.ClientConn // gprc 연결이다. 
+	client abci.ABCIClient // ABCI 클라이언트임
 
 	// 앱 정보 캐시
-	lastHeight  int64
-	lastAppHash []byte
+	lastHeight  int64 // 마지막 높이
+	lastAppHash []byte // 마지막 앱 해시
 
 	// 설정
-	address string
-	timeout time.Duration
+	address string // 연결 주소
+	timeout time.Duration // 타임 아웃
 }
 
 // ClientConfig - 클라이언트 설정
 type ClientConfig struct {
-	Address string
-	Timeout time.Duration
+	Address string // "localhost:26658"
+	Timeout time.Duration // 요청 타임 아웃
 }
 
 // DefaultClientConfig - 기본 설정

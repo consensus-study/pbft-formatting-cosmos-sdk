@@ -160,7 +160,7 @@ type MempoolMetrics struct {
 	LastBlockTime time.Time
 }
 
-// NewMempool creates a new mempool.
+// 새로운 맴풀 생성
 func NewMempool(config *Config) *Mempool {
 	if config == nil {
 		config = DefaultConfig()
