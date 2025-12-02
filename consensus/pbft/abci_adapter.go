@@ -17,15 +17,15 @@ import (
 // CometBFT v0.38.x ABCI 2.0 인터페이스 사용
 type ABCIAdapter struct {
 	mu     sync.RWMutex
-	client *abciclient.Client
+	client *abciclient.Client // ABCI 클라이언트
 
 	// 현재 상태
-	lastHeight  int64
-	lastAppHash []byte
+	lastHeight  int64 // 마지막 높이
+	lastAppHash []byte // 마지막 앱 해시
 
 	// 설정
-	maxTxBytes int64
-	chainID    string
+	maxTxBytes int64 // 최대 트랜잭션 크기
+	chainID    string // 체인 ID
 }
 
 // NewABCIAdapter - ABCI 어댑터 생성

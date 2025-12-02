@@ -21,24 +21,24 @@ type EngineV2 struct {
 	mu sync.RWMutex
 
 	config      *Config
-	view        uint64
-	sequenceNum uint64
+	view        uint64 // 현재 뷰
+	sequenceNum uint64 // 현재 블록 높이
 
-	validatorSet *types.ValidatorSet
-	stateLog     *StateLog
+	validatorSet *types.ValidatorSet // 검증자 목록
+	stateLog     *StateLog // 상태 저장소
 
-	transport Transport
+	transport Transport // P2P 통신
 
 	// ABCI 2.0 어댑터 (기존 Application 대신)
-	abciAdapter ABCIAdapterInterface
+	abciAdapter ABCIAdapterInterface // ABCI 어댑터
 
-	metrics *metrics.Metrics
+	metrics *metrics.Metrics 
 
-	msgChan     chan *Message
-	requestChan chan *RequestMsg
+	msgChan     chan *Message // 메시지수신채널
+	requestChan chan *RequestMsg // 요청 수신 채널
 
-	viewChangeTimer   *time.Timer
-	viewChangeManager *ViewChangeManager
+	viewChangeTimer   *time.Timer 
+	viewChangeManager *ViewChangeManager // 요청 수신 채널
 
 	checkpoints map[uint64][]byte
 
@@ -297,6 +297,7 @@ func (e *EngineV2) proposeBlock(req *RequestMsg) {
 
 // handlePrePrepare - PrePrepare 메시지 처리 (ABCI ProcessProposal 사용)
 func (e *EngineV2) handlePrePrepare(msg *Message) {
+	// 1. 리더 확인
 	if msg.NodeID != e.getPrimaryID() {
 		e.logger.Printf("[PBFT-V2] Received PRE-PREPARE from non-primary %s", msg.NodeID)
 		return
@@ -306,6 +307,7 @@ func (e *EngineV2) handlePrePrepare(msg *Message) {
 	currentView := e.view
 	e.mu.RUnlock()
 
+	// 2. 뷰 확인
 	if msg.View != currentView {
 		return
 	}
@@ -314,13 +316,14 @@ func (e *EngineV2) handlePrePrepare(msg *Message) {
 		return
 	}
 
+	// 3. 메시지 디코딩
 	var prePrepareMsg PrePrepareMsg
 	if err := json.Unmarshal(msg.Payload, &prePrepareMsg); err != nil {
 		e.logger.Printf("[PBFT-V2] Failed to decode PRE-PREPARE: %v", err)
 		return
 	}
 
-	// ABCI ProcessProposal 호출 - 블록 검증
+	// 4. ABCI ProcessProposal 호출 - 블록 검증
 	ctx, cancel := context.WithTimeout(e.ctx, 5*time.Second)
 	defer cancel()
 

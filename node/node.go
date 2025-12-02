@@ -20,10 +20,10 @@ import (
 type Node struct {
 	mu sync.RWMutex
 
-	config    *Config
-	engine    *pbft.Engine
-	transport *transport.GRPCTransport
-	metrics   *metrics.Metrics
+	config    *Config // 설정
+	engine    *pbft.Engine // PBFT 엔진
+	transport *transport.GRPCTransport // P2P 통신
+	metrics   *metrics.Metrics // 매트릭
 
 	// State
 	running bool

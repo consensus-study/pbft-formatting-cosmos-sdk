@@ -9,21 +9,21 @@ import (
 
 // Config holds configuration for a PBFT node.
 type Config struct {
-	// Node identification
-	NodeID  string
-	ChainID string
+	// 노드 식별
+	NodeID  string // "node0", "node1"
+	ChainID string // "pbft-chain"
 
-	// Network addresses
+	// 네트워크 주소
 	ListenAddr string // PBFT P2P listen address
 	ABCIAddr   string // ABCI app address
 
-	// Peer configuration (format: "nodeID@address")
+	// 피어 목록
 	Peers []string
 
-	// Validator configuration
+	// 검증자 목록
 	Validators []*pbft.ValidatorInfo
 
-	// PBFT timing configuration
+	// 타이밍
 	RequestTimeout     time.Duration
 	ViewChangeTimeout  time.Duration
 	CheckpointInterval uint64
