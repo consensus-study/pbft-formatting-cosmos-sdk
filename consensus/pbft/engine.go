@@ -870,7 +870,7 @@ func (e *Engine) broadcast(msg *Message) {
 	}
 }
 
-// SubmitRequest submits a new request to the consensus engine.
+// SubmitRequest는 리더가 블록 제안 할 때 쓰는 메서드임. operation은 tx임
 func (e *Engine) SubmitRequest(operation []byte, clientID string) error {
 	req := &RequestMsg{
 		Operation: operation,

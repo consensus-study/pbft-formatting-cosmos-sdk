@@ -149,12 +149,15 @@ func NewNodeWithABCI(config *Config) (*Node, error) {
 		return nil, fmt.Errorf("failed to create engine v2: %w", err)
 	}
 
+	// Connect Mempool to EngineV2
+	engineV2.SetMempool(mp)
+
 	// We need to wrap engineV2 for compatibility
 	// For now, use the regular engine for basic functionality
 	engine := pbft.NewEngine(pbftConfig, validatorSet, trans, nil, m)
-	_ = engineV2 // Use engineV2 when ABCI is connected
+	_ = engineV2 // TODO: 향후 EngineV2를 직접 사용하도록 리팩토링 필요
 
-	// Connect Mempool to Engine
+	// Connect Mempool to Engine (기존 Engine도 Mempool 연결 유지)
 	engine.SetMempool(mp)
 
 	return &Node{

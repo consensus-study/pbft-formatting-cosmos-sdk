@@ -12,6 +12,7 @@ import (
 
 	abci "github.com/cometbft/cometbft/abci/types"
 
+	"github.com/ahwlsqja/pbft-cosmos/mempool"
 	"github.com/ahwlsqja/pbft-cosmos/metrics"
 	"github.com/ahwlsqja/pbft-cosmos/types"
 )
@@ -25,20 +26,23 @@ type EngineV2 struct {
 	sequenceNum uint64 // 현재 블록 높이
 
 	validatorSet *types.ValidatorSet // 검증자 목록
-	stateLog     *StateLog // 상태 저장소
+	stateLog     *StateLog           // 상태 저장소
 
 	transport Transport // P2P 통신
 
 	// ABCI 2.0 어댑터 (기존 Application 대신)
 	abciAdapter ABCIAdapterInterface // ABCI 어댑터
 
-	metrics *metrics.Metrics 
+	// Mempool - 트랜잭션 풀 (선택적)
+	mempool *mempool.Mempool // 트랜잭션 풀
 
-	msgChan     chan *Message // 메시지수신채널
+	metrics *metrics.Metrics
+
+	msgChan     chan *Message    // 메시지수신채널
 	requestChan chan *RequestMsg // 요청 수신 채널
 
-	viewChangeTimer   *time.Timer 
-	viewChangeManager *ViewChangeManager // 요청 수신 채널
+	viewChangeTimer   *time.Timer
+	viewChangeManager *ViewChangeManager // 뷰 체인지 관리자
 
 	checkpoints map[uint64][]byte
 
@@ -233,6 +237,7 @@ func (e *EngineV2) proposeBlock(req *RequestMsg) {
 	e.sequenceNum++
 	seqNum := e.sequenceNum
 	view := e.view
+	mp := e.mempool
 	e.mu.Unlock()
 
 	if !e.stateLog.IsInWindow(seqNum) {
@@ -240,10 +245,29 @@ func (e *EngineV2) proposeBlock(req *RequestMsg) {
 		return
 	}
 
-	// 트랜잭션 수집
+	// 트랜잭션 수집 - Mempool에서 가져오거나, 없으면 단일 요청 사용
 	var txs [][]byte
-	if req != nil {
+	if mp != nil {
+		// Mempool에서 최대 500개 트랜잭션을 FIFO 순서로 가져옴
+		mempoolTxs := mp.ReapMaxTxs(500)
+		for _, tx := range mempoolTxs {
+			txs = append(txs, tx.Data)
+		}
+		e.logger.Printf("[PBFT-V2] Reaped %d txs from mempool for block %d", len(txs), seqNum)
+	}
+
+	// Mempool에서 가져온 트랜잭션이 없고, 직접 요청이 있으면 추가
+	if len(txs) == 0 && req != nil {
 		txs = append(txs, req.Operation)
+	}
+
+	// 트랜잭션이 없으면 빈 블록 생성하지 않음 (선택적)
+	if len(txs) == 0 {
+		e.logger.Printf("[PBFT-V2] No transactions to propose for block %d", seqNum)
+		e.mu.Lock()
+		e.sequenceNum-- // 롤백
+		e.mu.Unlock()
+		return
 	}
 
 	// ABCI PrepareProposal 호출 - 앱에게 트랜잭션 정렬/필터링 요청
@@ -487,7 +511,19 @@ func (e *EngineV2) executeBlock(state *State) {
 	// 확정된 블록 목록에 추가
 	e.mu.Lock()
 	e.committedBlocks = append(e.committedBlocks, state.Block)
+	mp := e.mempool
 	e.mu.Unlock()
+
+	// Mempool에서 커밋된 트랜잭션 제거
+	if mp != nil && len(state.Block.Transactions) > 0 {
+		committedTxs := make([][]byte, len(state.Block.Transactions))
+		for i, tx := range state.Block.Transactions {
+			committedTxs[i] = tx.Data
+		}
+		mp.Update(int64(state.SequenceNum), committedTxs)
+		e.logger.Printf("[PBFT-V2] Mempool updated: removed %d committed txs, remaining: %d",
+			len(committedTxs), mp.Size())
+	}
 
 	// 메트릭 기록
 	if e.metrics != nil {
@@ -822,6 +858,21 @@ func (e *EngineV2) broadcast(msg *Message) {
 }
 
 // 공개 API 메서드들
+
+// SetMempool - Mempool 설정 (Node에서 호출)
+func (e *EngineV2) SetMempool(mp *mempool.Mempool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.mempool = mp
+	e.logger.Printf("[PBFT-V2] Mempool connected to engine")
+}
+
+// GetMempool - Mempool 반환
+func (e *EngineV2) GetMempool() *mempool.Mempool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.mempool
+}
 
 // SubmitRequest - 트랜잭션 제출
 func (e *EngineV2) SubmitRequest(operation []byte, clientID string) error {

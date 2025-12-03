@@ -53,6 +53,82 @@ type Engine struct {
 }
 ```
 
+#### EngineV2 (consensus/pbft/engine_v2.go) - ABCI 2.0 호환 PBFT 엔진
+```go
+// EngineV2 - ABCI 2.0 호환 PBFT 엔진
+// Cosmos SDK v0.53.0 + CometBFT v0.38.x와 호환되는 버전
+// Engine과 동일한 PBFT 합의를 수행하지만, ABCI 2.0 인터페이스 사용
+type EngineV2 struct {
+    mu sync.RWMutex  // 동시성 제어용 뮤텍스
+
+    // 기본 설정
+    config *Config  // PBFT 설정
+
+    // PBFT 상태
+    view        uint64  // 현재 뷰 번호
+    sequenceNum uint64  // 현재 시퀀스 번호 (= 블록 높이)
+
+    // 검증자 관리
+    validatorSet *types.ValidatorSet  // 검증자 목록
+
+    // 상태 관리
+    stateLog *StateLog  // PBFT 상태 로그
+
+    // 외부 의존성
+    transport   Transport             // 네트워크 통신 계층
+    abciAdapter ABCIAdapterInterface  // ABCI 2.0 어댑터 (Application 대체)
+    mempool     *mempool.Mempool      // 트랜잭션 풀 (Mempool 통합)
+    metrics     *metrics.Metrics      // Prometheus 메트릭
+
+    // 채널 (비동기 처리)
+    msgChan     chan *Message     // 수신 메시지 처리 채널
+    requestChan chan *RequestMsg  // 클라이언트 요청 처리 채널
+
+    // 뷰 변경 관리
+    viewChangeTimer   *time.Timer        // 뷰 변경 타임아웃 타이머
+    viewChangeManager *ViewChangeManager // 뷰 변경 로직 관리자
+
+    // 체크포인트
+    checkpoints map[uint64][]byte  // 시퀀스 번호 → 상태 다이제스트
+
+    // 종료 관리
+    ctx    context.Context     // 종료 컨텍스트
+    cancel context.CancelFunc  // 종료 함수
+
+    // 로깅
+    logger *log.Logger  // 로거
+
+    // 상태 추적
+    committedBlocks []*types.Block  // 확정된 블록 목록
+    lastAppHash     []byte          // 마지막 앱 해시 (ABCI Commit 결과)
+    chainID         string          // 체인 ID
+}
+
+// ABCIAdapterInterface - ABCI 어댑터 인터페이스
+// EngineV2가 사용하는 ABCI 2.0 호출 인터페이스
+type ABCIAdapterInterface interface {
+    Close() error
+    InitChain(ctx context.Context, chainID string, validators []*types.Validator, appState []byte) error
+    PrepareProposal(ctx context.Context, height int64, proposer []byte, txs [][]byte) ([][]byte, error)
+    ProcessProposal(ctx context.Context, height int64, proposer []byte, txs [][]byte, hash []byte) (bool, error)
+    FinalizeBlock(ctx context.Context, block *types.Block) (*ABCIExecutionResult, error)
+    Commit(ctx context.Context) (appHash []byte, retainHeight int64, err error)
+    CheckTx(ctx context.Context, tx []byte) error
+    GetLastAppHash() []byte
+    GetLastHeight() int64
+    SetLastAppHash(hash []byte)
+}
+```
+
+**Engine vs EngineV2 비교:**
+| 특징 | Engine | EngineV2 |
+|------|--------|----------|
+| ABCI 버전 | Application 인터페이스 | ABCI 2.0 (PrepareProposal/ProcessProposal) |
+| Mempool 통합 | ✅ SetMempool() | ✅ SetMempool() |
+| 블록 제안 | mempool.ReapMaxTxs() | mempool.ReapMaxTxs() + PrepareProposal |
+| 블록 검증 | ValidateBlock() | ProcessProposal() |
+| 블록 실행 | ExecuteBlock() | FinalizeBlock() + Commit() |
+
 #### Config (consensus/pbft/engine.go) - PBFT 설정
 ```go
 // Config - PBFT 엔진 설정 구조체

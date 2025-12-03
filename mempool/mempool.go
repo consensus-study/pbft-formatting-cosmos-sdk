@@ -329,7 +329,7 @@ func (mp *Mempool) AddTxWithMeta(txBytes []byte, sender string, nonce, gasPrice,
 		}
 	}
 
-	// 7. CheckTx 콜백 호출
+	// 11. CheckTx 콜백 호출
 	if mp.checkTxCallback != nil {
 		if err := mp.checkTxCallback(tx); err != nil {
 			mp.rejectTx()
@@ -337,22 +337,25 @@ func (mp *Mempool) AddTxWithMeta(txBytes []byte, sender string, nonce, gasPrice,
 		}
 	}
 
-	// 8. 용량 체크 및 필요시 퇴출
+	// 12. 용량 체크 및 필요시 퇴출
 	if err := mp.ensureCapacity(tx); err != nil {
 		mp.rejectTx()
 		return err
 	}
 
-	// 9. 저장
+	// 13. 저장
 	mp.addTxLocked(tx)
 
-	// 10. 새 트랜잭션 알림 (브로드캐스트용)
+	// 14. 새 트랜잭션 알림 (브로드캐스트용)
+	// 이 tx가 있을경우에 mp.newTxch 라는 채널에 넣는다.
 	select {
 	case mp.newTxCh <- tx:
 	default:
 		// 채널이 가득 차면 무시
 	}
-
+	
+	// 매트릭 변수에 락걸고 active된 트랜젹션들 개수세는거 +1 하는거다.
+	// 즉 모니터링.
 	mp.acceptTx()
 	return nil
 }
@@ -372,6 +375,7 @@ func (mp *Mempool) checkNonce(sender string, nonce uint64) error {
 		return fmt.Errorf("%w: got %d, expected > %d", ErrLowNonce, nonce, lastNonce)
 	}
 
+	// 3. 만약 nonce가 lastNonce 보다 + 1크면 에러 발생 -> 내가 보기에는 nonce = lastNonce + 1인 상태를 원하는 것 같음.
 	if nonce > lastNonce+1 {
 		// Nonce 갭 허용 (pending 트랜잭션 고려)
 		// 엄격한 모드에서는 에러 반환
@@ -381,9 +385,9 @@ func (mp *Mempool) checkNonce(sender string, nonce uint64) error {
 	return nil
 }
 
-// ensureCapacity ensures there's room for the new transaction.
+// ensureCapacity 새로운 트랜잭션을 저장한 크기 있는지 검증하는 함수
 func (mp *Mempool) ensureCapacity(newTx *Tx) error {
-	// 트랜잭션 수 체크
+	// 맴풀의 트랜잭션 카운트가 설정한 최대 트랜잭션 개수(공간) 보다 크면 에러 발생함
 	for mp.txCount >= mp.config.MaxTxs {
 		if err := mp.evictLowestPriority(newTx.GasPrice); err != nil {
 			return ErrMempoolFull
@@ -400,11 +404,14 @@ func (mp *Mempool) ensureCapacity(newTx *Tx) error {
 	return nil
 }
 
-// evictLowestPriority removes the lowest priority transaction.
+// evictLowestPriority 가장 낮은 우선 순위의 트랜잭션을 삭제함.
 func (mp *Mempool) evictLowestPriority(minPrice uint64) error {
+	// lowestTx 포인터로 배정
 	var lowestTx *Tx
+	// lowestPrice를 선언 최대값으로 선언하는거다. 11111111111111 이런식
 	var lowestPrice uint64 = ^uint64(0) // Max uint64
 
+	// 순회 돌면서 맴풀에 있는 txStore의 트랜잭션들의 가장작은 가스비를 걸려내는 O(n)짜리 순회문이다.
 	for _, tx := range mp.txStore {
 		if tx.GasPrice < lowestPrice {
 			lowestPrice = tx.GasPrice
@@ -412,15 +419,17 @@ func (mp *Mempool) evictLowestPriority(minPrice uint64) error {
 		}
 	}
 
+	// 만약에 그런 트랜잭션이 존재하지 않으면 에러를 내뱉는다
 	if lowestTx == nil {
 		return errors.New("no transaction to evict")
 	}
 
-	// 새 트랜잭션보다 낮은 우선순위만 퇴출
+	// 새 트랜잭션보다 낮은 우선순위만 퇴출 다시말하면 가장 낮은 우선순위의(가스비가 가장작은) 보다 작으걸 넣으려고 하니까 에러를 내뱉는거다.
 	if lowestPrice >= minPrice {
 		return errors.New("cannot evict higher priority transaction")
 	}
 
+	// 한 트랜잭션을 삭제하는 매서드이다.
 	mp.removeTxLocked(lowestTx.ID, true)
 
 	mp.metrics.mu.Lock()
@@ -457,8 +466,10 @@ func (mp *Mempool) addTxLocked(tx *Tx) {
 	mp.updateMetrics()
 }
 
-// removeTxLocked removes a transaction (must hold lock).
+// removeTxLocked 한 트랜잭션을 삭제하는 메서드이다.
 func (mp *Mempool) removeTxLocked(txID string, addToCache bool) {
+	// 매서드에 데이터(Mempool)에 대한 Lock은 이걸 부르는 부모 메서드에서 걸어놨다.
+	// 만약 txID에 해당하는 트랜잭션의 유효성을 검사한다
 	tx, exists := mp.txStore[txID]
 	if !exists {
 		return
@@ -466,18 +477,26 @@ func (mp *Mempool) removeTxLocked(txID string, addToCache bool) {
 
 	// txStore에서 제거
 	delete(mp.txStore, txID)
+	// 맴풀에서의 트랜잭션 개수를 하나 줄이고
 	mp.txCount--
+	// 전체 트랜잭션 바이트 크기도 삭제한 트랜잭션의 크기 만큼 빼준다.
 	mp.txBytes -= int64(tx.Size())
 
 	// senderIndex에서 제거
 	if tx.Sender != "" {
+	// 특정 sender의 트랜잭션들 중에서 순회를 통면서 그 트랜잭션을 찾는다
 		senderTxs := mp.senderIndex[tx.Sender]
 		for i, t := range senderTxs {
+			// 만약에 그 트랜잭션을 발견했을 때는 이를테면 [0, 1, 3, 5, 2, 7, 9] 라는 배열이 있었다면
+			// i가 5라 즉 index 가 4라고 하자. 그러면 [0, 1, 3] + [2, 7, 9] 형태가 되어서 특정 인덱스(삭제하려는)이 없어지는 것이다.
+			// 그래서 그 트랜잭션을 찾으면 break로 탈출을 한다고 보면된다. 
+			// 시간복잡도는 최소 O(1) 이고 최악에 경우에 O(n)라고 보면된다.
 			if t.ID == txID {
 				mp.senderIndex[tx.Sender] = append(senderTxs[:i], senderTxs[i+1:]...)
 				break
 			}
 		}
+		// 만약에 애시당초 부터 그 sender는 존재하지만 트랜잭션이 없는 경우에는 그 sender 자체ㅐ를 삭제한다. 
 		if len(mp.senderIndex[tx.Sender]) == 0 {
 			delete(mp.senderIndex, tx.Sender)
 		}
@@ -488,6 +507,7 @@ func (mp *Mempool) removeTxLocked(txID string, addToCache bool) {
 		mp.recentlyRemoved[txID] = time.Now()
 	}
 
+	// 바뀐 상태를 통해 매트릭을 업데이트 한다.
 	mp.updateMetrics()
 }
 
