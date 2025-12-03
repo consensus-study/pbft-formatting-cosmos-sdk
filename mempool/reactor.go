@@ -49,16 +49,16 @@ P2P 네트워크를 통해 트랜잭션을 전파하고 수신합니다.
 ================================================================================
 */
 
-// Broadcaster defines the interface for broadcasting transactions.
+// Broadcaster는 트랜잭션 전파를 위한 인터페이스임.
 type Broadcaster interface {
-	// BroadcastTx broadcasts a transaction to all peers.
+	// 모든 피어에 대한 트랜잭션을 전파함
 	BroadcastTx(tx []byte) error
 
-	// SendTx sends a transaction to a specific peer.
+	// SendTx는 특정 피어에 대한 트랜잭션 전파임
 	SendTx(peerID string, tx []byte) error
 }
 
-// ReactorConfig holds reactor configuration.
+// ReactorConfig는 리액터 설정임.
 type ReactorConfig struct {
 	// 브로드캐스트 설정
 	BroadcastEnabled bool          // 브로드캐스트 활성화
@@ -69,7 +69,7 @@ type ReactorConfig struct {
 	MaxPendingTxs int // 처리 대기 최대 tx 수
 }
 
-// DefaultReactorConfig returns the default reactor configuration.
+// DefaultReactorConfig는 리액터의 리폴트 설정값임
 func DefaultReactorConfig() *ReactorConfig {
 	return &ReactorConfig{
 		BroadcastEnabled:  true,
@@ -79,7 +79,7 @@ func DefaultReactorConfig() *ReactorConfig {
 	}
 }
 
-// Reactor connects the mempool to the network layer.
+// Reactor는 네트워크 계층과 맴풀을 연결함
 type Reactor struct {
 	mu sync.RWMutex
 
@@ -87,7 +87,7 @@ type Reactor struct {
 	mempool *Mempool
 
 	// 네트워크 브로드캐스터
-	broadcaster Broadcaster
+	broadcaster Broadcaster 
 
 	// 브로드캐스트 큐
 	broadcastQueue chan *Tx

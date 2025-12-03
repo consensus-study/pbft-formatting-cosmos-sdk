@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ahwlsqja/pbft-cosmos/mempool"
 	"github.com/ahwlsqja/pbft-cosmos/metrics"
 	"github.com/ahwlsqja/pbft-cosmos/types"
 )
@@ -92,6 +93,9 @@ type Engine struct {
 
 	//애플리케이션
 	app Application
+
+	// Mempool - 트랜잭션 풀
+	mempool *mempool.Mempool
 
 	// 모니터링
 	metrics *metrics.Metrics
@@ -178,7 +182,7 @@ func (e *Engine) onViewChangeComplete(newView uint64) {
 	e.resetViewChangeTimer()
 
 	// 내가 새 리더면 대기 중인 요청 처리
-	if e.isPrimary() {
+	if e.IsPrimary() {
 		e.logger.Printf("[PBFT] I am the new primary for view %d", newView)
 	}
 }
@@ -202,6 +206,21 @@ func (e *Engine) Stop() {
 	e.cancel() // 컨센서스 취소 ->run() 종료
 }
 
+// SetMempool sets the mempool for the engine.
+// Mempool을 엔진에 연결합니다.
+func (e *Engine) SetMempool(mp *mempool.Mempool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.mempool = mp
+}
+
+// GetMempool returns the mempool.
+func (e *Engine) GetMempool() *mempool.Mempool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.mempool
+}
+
 // 메인 컨센서스 루프 시작
 // 1. ctx.Done(): 종료 신호
 // 2. msgChan: 다른 노드에서 온 메시지 (Preprepare, Prepare, Commit 등)
@@ -220,7 +239,7 @@ func (e *Engine) run() {
 
 		case req := <-e.requestChan:
 			// 클라이언트 요청 도착
-			if e.isPrimary() {
+			if e.IsPrimary() {
 				e.proposeBlock(req) // 리더만 블록 제안
 			}
 		}
@@ -267,8 +286,9 @@ func (e *Engine) handleMessage(msg *Message) {
 	}
 }
 
+// IsPrimary returns true if this node is the primary for the current view.
 // 리더 확인
-func (e *Engine) isPrimary() bool {
+func (e *Engine) IsPrimary() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -290,10 +310,11 @@ func (e *Engine) getPrimaryID() string {
 func (e *Engine) proposeBlock(req *RequestMsg) {
 	e.mu.Lock()
 	e.sequenceNum++
-	// 블록높이 ++ 
+	// 블록높이 ++
 	seqNum := e.sequenceNum
 	// 리더 저장
 	view := e.view
+	mp := e.mempool
 	e.mu.Unlock()
 
 	// 블록 높이가 윈도우에 있는지 체크
@@ -302,9 +323,23 @@ func (e *Engine) proposeBlock(req *RequestMsg) {
 		return
 	}
 
-	// 트랜잭션 수집
+	// 트랜잭션 수집 - Mempool 우선, 없으면 Application에서
 	var txs []types.Transaction
-	if e.app != nil {
+
+	// 1. Mempool에서 트랜잭션 가져오기
+	if mp != nil {
+		mempoolTxs := mp.ReapMaxTxs(500) // 최대 500개
+		for _, mptx := range mempoolTxs {
+			txs = append(txs, types.Transaction{
+				ID:        mptx.ID,
+				Data:      mptx.Data,
+				Timestamp: mptx.Timestamp,
+				From:      mptx.Sender,
+			})
+		}
+		e.logger.Printf("[PBFT] Collected %d txs from mempool", len(mempoolTxs))
+	} else if e.app != nil {
+		// 2. Mempool 없으면 Application에서 가져오기 (하위 호환성)
 		txs = e.app.GetPendingTransactions()
 	}
 
@@ -529,7 +564,21 @@ func (e *Engine) executeBlock(state *State) {
 	// Add to committed blocks
 	e.mu.Lock()
 	e.committedBlocks = append(e.committedBlocks, state.Block)
+	mp := e.mempool
 	e.mu.Unlock()
+
+	// Mempool 업데이트 - 커밋된 트랜잭션 제거
+	if mp != nil {
+		committedTxs := make([][]byte, len(state.Block.Transactions))
+		for i, tx := range state.Block.Transactions {
+			committedTxs[i] = tx.Data
+		}
+		if err := mp.Update(int64(state.SequenceNum), committedTxs); err != nil {
+			e.logger.Printf("[PBFT] Mempool update failed: %v", err)
+		} else {
+			e.logger.Printf("[PBFT] Mempool updated: removed %d committed txs", len(committedTxs))
+		}
+	}
 
 	// Record metrics
 	if e.metrics != nil {
@@ -856,4 +905,56 @@ func (e *Engine) GetCommittedBlocks() []*types.Block {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.committedBlocks
+}
+
+// StateProvider 인터페이스 구현 (transport.StateProvider)
+
+// GetBlocksFromHeight returns blocks from the specified height.
+// 지정된 높이부터 커밋된 블록들을 반환합니다.
+func (e *Engine) GetBlocksFromHeight(fromHeight uint64) []*types.Block {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	var result []*types.Block
+	for _, block := range e.committedBlocks {
+		if block.Header.Height >= fromHeight {
+			result = append(result, block)
+		}
+	}
+	return result
+}
+
+// GetCheckpoints returns all stored checkpoints.
+// 저장된 모든 체크포인트를 반환합니다.
+func (e *Engine) GetCheckpoints() []Checkpoint {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	checkpoints := make([]Checkpoint, 0, len(e.checkpoints))
+	for seqNum, digest := range e.checkpoints {
+		checkpoints = append(checkpoints, Checkpoint{
+			SequenceNum: seqNum,
+			Digest:      digest,
+			NodeID:      e.config.NodeID,
+		})
+	}
+	return checkpoints
+}
+
+// GetCheckpoint returns the checkpoint for a specific sequence number.
+// 특정 시퀀스 번호의 체크포인트를 반환합니다.
+func (e *Engine) GetCheckpoint(seqNum uint64) (*Checkpoint, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	digest, exists := e.checkpoints[seqNum]
+	if !exists {
+		return nil, false
+	}
+
+	return &Checkpoint{
+		SequenceNum: seqNum,
+		Digest:      digest,
+		NodeID:      e.config.NodeID,
+	}, true
 }

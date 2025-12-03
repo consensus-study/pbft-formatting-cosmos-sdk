@@ -25,7 +25,7 @@ type Tx struct {
 
 	// 상태
 	Height    int64 // CheckTx 시점의 블록 높이
-	CheckedAt time.Time
+	CheckedAt time.Time // 검증 시간
 }
 
 // NewTx creates a new transaction from raw bytes.

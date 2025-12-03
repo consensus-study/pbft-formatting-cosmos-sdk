@@ -15,8 +15,12 @@ import (
                            MEMPOOL 아키텍처
 ================================================================================
 
+ABCI 2.0 설계 철학:
+- Mempool: FIFO 순서로 트랜잭션 저장 (단순성, 빠른 삽입/삭제)
+- PrepareProposal: ABCI 앱에서 트랜잭션 정렬/필터링 담당 (유연성)
+
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              MEMPOOL                                         │
+│                              MEMPOOL (FIFO)                                  │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │                         txStore (map)                                │    │
@@ -35,14 +39,8 @@ import (
 │  │   └──────────────────┘  └──────────────────┘                        │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                      priorityQueue                                   │    │
-│  │              (GasPrice 기준 우선순위 정렬)                            │    │
-│  │                                                                      │    │
-│  │   높은 우선순위 ◄─────────────────────────────► 낮은 우선순위        │    │
-│  │   [tx7:100] [tx3:80] [tx1:50] [tx5:30] [tx2:20] [tx4:10]            │    │
-│  │                                                                      │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
+│  ReapMaxTxs() → FIFO 순서 (Timestamp)로 반환                                 │
+│  정렬은 ABCI App의 PrepareProposal에서 처리                                   │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 
@@ -157,7 +155,7 @@ type MempoolMetrics struct {
 	CurrentBytes  int64 // 현재 바이트
 	PeakSize      int   // 최대 크기
 	PeakBytes     int64 // 최대 바이트
-	LastBlockTime time.Time
+	LastBlockTime time.Time // 마지막 블록 시간
 }
 
 // 새로운 맴풀 생성
@@ -481,25 +479,37 @@ func (mp *Mempool) removeTxLocked(txID string, addToCache bool) {
                        트랜잭션 조회 (블록 제안용)
 ================================================================================
 
-  Primary Node              Mempool
-       │                       │
-       │  1. ReapMaxTxs(max)   │
-       │ ─────────────────────►│
-       │                       │
-       │                       │ 2. 우선순위 정렬
-       │                       │    (GasPrice DESC)
-       │                       │
-       │                       │ 3. 상위 N개 선택
-       │                       │
-       │  4. []*Tx 반환        │
-       │◄───────────────────── │
-       │                       │
+  ABCI 2.0 설계 철학:
+  - Mempool: FIFO 순서로 트랜잭션 저장/반환 (단순성, O(1) 삽입/삭제)
+  - PrepareProposal: ABCI 앱에서 트랜잭션 정렬/필터링 담당 (유연성)
+
+  Primary Node              Mempool                    ABCI App
+       │                       │                          │
+       │  1. ReapMaxTxs(max)   │                          │
+       │ ─────────────────────►│                          │
+       │                       │                          │
+       │                       │ 2. FIFO 순서로 반환       │
+       │                       │    (정렬 없음)            │
+       │                       │                          │
+       │  3. []*Tx 반환        │                          │
+       │◄───────────────────── │                          │
+       │                       │                          │
+       │  4. PrepareProposal(txs)                         │
+       │ ────────────────────────────────────────────────►│
+       │                       │                          │
+       │                       │     5. 앱에서 정렬/필터링  │
+       │                       │        (GasPrice, MEV 등) │
+       │                       │                          │
+       │  6. 정렬된 txs 반환   │                          │
+       │◄──────────────────────────────────────────────── │
+       │                       │                          │
 
 ================================================================================
 */
 
 // ReapMaxTxs returns up to max transactions for block proposal.
-// Transactions are sorted by priority (gas price).
+// Returns transactions in FIFO order (arrival time).
+// Sorting/filtering should be done by the ABCI app in PrepareProposal.
 func (mp *Mempool) ReapMaxTxs(max int) []*Tx {
 	mp.mu.RLock()
 	defer mp.mu.RUnlock()
@@ -512,15 +522,15 @@ func (mp *Mempool) ReapMaxTxs(max int) []*Tx {
 		return nil
 	}
 
-	// 모든 트랜잭션을 슬라이스로 복사
+	// FIFO 순서로 트랜잭션 반환 (Timestamp 기준)
 	txs := make([]*Tx, 0, mp.txCount)
 	for _, tx := range mp.txStore {
 		txs = append(txs, tx)
 	}
 
-	// 우선순위 정렬 (GasPrice 내림차순)
+	// 도착 순서(Timestamp)로 정렬 - FIFO
 	sort.Slice(txs, func(i, j int) bool {
-		return txs[i].GasPrice > txs[j].GasPrice
+		return txs[i].Timestamp.Before(txs[j].Timestamp)
 	})
 
 	// 상위 max개 반환
@@ -531,7 +541,8 @@ func (mp *Mempool) ReapMaxTxs(max int) []*Tx {
 	return txs
 }
 
-// ReapMaxBytes returns transactions up to maxBytes.
+// ReapMaxBytes returns transactions up to maxBytes in FIFO order.
+// Sorting/filtering should be done by the ABCI app in PrepareProposal.
 func (mp *Mempool) ReapMaxBytes(maxBytes int64) []*Tx {
 	mp.mu.RLock()
 	defer mp.mu.RUnlock()
@@ -540,7 +551,7 @@ func (mp *Mempool) ReapMaxBytes(maxBytes int64) []*Tx {
 		return nil
 	}
 
-	// 우선순위 정렬된 트랜잭션 가져오기
+	// FIFO 순서로 트랜잭션 가져오기
 	allTxs := mp.ReapMaxTxs(mp.txCount)
 
 	var result []*Tx

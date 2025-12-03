@@ -15,8 +15,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/ahwlsqja/pbft-cosmos/consensus/pbft"
 	"github.com/ahwlsqja/pbft-cosmos/node"
+	"github.com/ahwlsqja/pbft-cosmos/types"
 )
 
 var rootCmd = &cobra.Command{
@@ -170,13 +170,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func loadValidatorsFromFile(path string) ([]*pbft.ValidatorInfo, error) {
+func loadValidatorsFromFile(path string) ([]*types.Validator, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 
-	var validators []*pbft.ValidatorInfo
+	var validators []*types.Validator
 	if err := json.Unmarshal(data, &validators); err != nil {
 		return nil, err
 	}
@@ -184,13 +184,13 @@ func loadValidatorsFromFile(path string) ([]*pbft.ValidatorInfo, error) {
 	return validators, nil
 }
 
-func createDefaultValidators() []*pbft.ValidatorInfo {
+func createDefaultValidators() []*types.Validator {
 	// Default 4-node validator set for testing
-	return []*pbft.ValidatorInfo{
-		{ID: "node0", PubKey: []byte("pubkey0"), VotingPower: 10},
-		{ID: "node1", PubKey: []byte("pubkey1"), VotingPower: 10},
-		{ID: "node2", PubKey: []byte("pubkey2"), VotingPower: 10},
-		{ID: "node3", PubKey: []byte("pubkey3"), VotingPower: 10},
+	return []*types.Validator{
+		{ID: "node0", PublicKey: []byte("pubkey0"), Power: 10},
+		{ID: "node1", PublicKey: []byte("pubkey1"), Power: 10},
+		{ID: "node2", PublicKey: []byte("pubkey2"), Power: 10},
+		{ID: "node3", PublicKey: []byte("pubkey3"), Power: 10},
 	}
 }
 

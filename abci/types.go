@@ -5,34 +5,36 @@ import (
 	"time"
 
 	abci "github.com/cometbft/cometbft/abci/types"
+	"github.com/cometbft/cometbft/proto/tendermint/crypto"
+	cmttypes "github.com/cometbft/cometbft/proto/tendermint/types"
 )
 
 // ExecutionResult - 블록 실행 결과
 type ExecutionResult struct {
-	TxResults             []TxResult // 트랜잭션 결과들
-	ValidatorUpdates      []abci.ValidatorUpdate // 검증자
-	ConsensusParamUpdates *abci.ConsensusParams // 합의 파라미터
-	AppHash               []byte // 앱 해시
-	Events                []abci.Event // 이벤트들
-} 
+	TxResults             []TxResult                // 트랜잭션 결과들
+	ValidatorUpdates      []abci.ValidatorUpdate    // 검증자
+	ConsensusParamUpdates *cmttypes.ConsensusParams // 합의 파라미터
+	AppHash               []byte                    // 앱 해시
+	Events                []abci.Event              // 이벤트들
+}
 
 // TxResult - 트랜잭션 실행 결과
 type TxResult struct {
-	Code      uint32 // 트랜잭션 성공 실패
-	Data      []byte // 반환 데이터
-	Log       string // 로그 메시지
-	Info      string // 추가 정보
-	GasWanted int64 // 요청 가스
-	GasUsed   int64 // 사용 가스
+	Code      uint32       // 트랜잭션 성공 실패
+	Data      []byte       // 반환 데이터
+	Log       string       // 로그 메시지
+	Info      string       // 추가 정보
+	GasWanted int64        // 요청 가스
+	GasUsed   int64        // 사용 가스
 	Events    []abci.Event // 이벤트들
 }
 
 // QueryResult - 쿼리 결과
 type QueryResult struct {
-	Key      []byte // 키
-	Value    []byte // 값
-	Height   int64 // 높이
-	ProofOps *abci.ProofOps // 증명 정보
+	Key      []byte          // 키
+	Value    []byte          // 값
+	Height   int64           // 높이
+	ProofOps *crypto.ProofOps // 증명 정보
 }
 
 // BlockData - PBFT 블록 데이터 (ABCI 변환용)
@@ -121,16 +123,15 @@ func FinalizeBlockResponseToResult(resp *abci.ResponseFinalizeBlock) *ExecutionR
 
 // ValidatorUpdate - 검증자 업데이트 헬퍼
 type ValidatorUpdate struct {
-	PubKey []byte // 공개키
-	Power  int64 // 투표력
+	PubKey []byte // 공개키 (Ed25519)
+	Power  int64  // 투표력
 }
 
 // ToABCIValidatorUpdate - ABCI ValidatorUpdate로 변환
 func (v *ValidatorUpdate) ToABCIValidatorUpdate() abci.ValidatorUpdate {
 	return abci.ValidatorUpdate{
-		PubKey: abci.PubKey{
-			Type: "ed25519",
-			Data: v.PubKey,
+		PubKey: crypto.PublicKey{
+			Sum: &crypto.PublicKey_Ed25519{Ed25519: v.PubKey},
 		},
 		Power: v.Power,
 	}
@@ -138,8 +139,14 @@ func (v *ValidatorUpdate) ToABCIValidatorUpdate() abci.ValidatorUpdate {
 
 // FromABCIValidatorUpdate - ABCI ValidatorUpdate에서 변환
 func FromABCIValidatorUpdate(update abci.ValidatorUpdate) *ValidatorUpdate {
+	var pubKey []byte
+	if ed25519Key := update.PubKey.GetEd25519(); ed25519Key != nil {
+		pubKey = ed25519Key
+	} else if secp256k1Key := update.PubKey.GetSecp256K1(); secp256k1Key != nil {
+		pubKey = secp256k1Key
+	}
 	return &ValidatorUpdate{
-		PubKey: update.PubKey.Data,
+		PubKey: pubKey,
 		Power:  update.Power,
 	}
 }

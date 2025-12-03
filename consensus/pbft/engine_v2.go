@@ -519,25 +519,65 @@ func (e *EngineV2) handleValidatorUpdates(updates []abci.ValidatorUpdate) {
 	defer e.mu.Unlock()
 
 	for _, update := range updates {
-		pubKeyStr := string(update.PubKey.Data)
+		// CometBFT v0.38.x: PublicKey는 oneof로 Ed25519 또는 Secp256k1 키를 포함
+		var pubKey []byte
+		if ed25519Key := update.PubKey.GetEd25519(); ed25519Key != nil {
+			pubKey = ed25519Key
+		} else if secp256k1Key := update.PubKey.GetSecp256K1(); secp256k1Key != nil {
+			pubKey = secp256k1Key
+		}
+		if pubKey == nil {
+			continue
+		}
+
+		pubKeyStr := string(pubKey)
 		if update.Power == 0 {
 			// 검증자 제거
-			e.validatorSet.RemoveByPubKey(update.PubKey.Data)
-			e.logger.Printf("[PBFT-V2] Validator removed: %x...", update.PubKey.Data[:min(16, len(update.PubKey.Data))])
+			e.removeValidatorByPubKey(pubKey)
+			e.logger.Printf("[PBFT-V2] Validator removed: %x...", pubKey[:min(16, len(pubKey))])
 		} else {
 			// 검증자 추가/업데이트
-			e.validatorSet.UpdateValidator(&types.Validator{
+			e.updateOrAddValidator(&types.Validator{
 				ID:        pubKeyStr,
-				PublicKey: update.PubKey.Data,
+				PublicKey: pubKey,
 				Power:     update.Power,
 			})
 			e.logger.Printf("[PBFT-V2] Validator updated: %x..., power=%d",
-				update.PubKey.Data[:min(16, len(update.PubKey.Data))], update.Power)
+				pubKey[:min(16, len(pubKey))], update.Power)
 		}
 	}
 
 	// ViewChangeManager quorum 업데이트
-	e.viewChangeManager.UpdateQuorumSize(e.validatorSet.QuorumSize())
+	e.updateViewChangeQuorum()
+}
+
+// removeValidatorByPubKey - 공개키로 검증자 제거 (내부 헬퍼)
+func (e *EngineV2) removeValidatorByPubKey(pubKey []byte) {
+	newValidators := make([]*types.Validator, 0)
+	for _, v := range e.validatorSet.Validators {
+		if string(v.PublicKey) != string(pubKey) {
+			newValidators = append(newValidators, v)
+		}
+	}
+	e.validatorSet.Validators = newValidators
+}
+
+// updateOrAddValidator - 검증자 추가 또는 업데이트 (내부 헬퍼)
+func (e *EngineV2) updateOrAddValidator(v *types.Validator) {
+	for i, existing := range e.validatorSet.Validators {
+		if existing.ID == v.ID {
+			e.validatorSet.Validators[i] = v
+			return
+		}
+	}
+	e.validatorSet.Validators = append(e.validatorSet.Validators, v)
+}
+
+// updateViewChangeQuorum - 뷰 체인지 쿼럼 업데이트 (내부 헬퍼)
+func (e *EngineV2) updateViewChangeQuorum() {
+	if e.viewChangeManager != nil {
+		e.viewChangeManager.quorumSize = e.validatorSet.QuorumSize()
+	}
 }
 
 // createCheckpoint - 체크포인트 생성

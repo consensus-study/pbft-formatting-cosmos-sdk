@@ -15,8 +15,8 @@ type Metrics struct {
 	mu sync.RWMutex
 
 	// Consensus metrics
-	consensusRoundsTotal   prometheus.Counter
-	consensusDuration      prometheus.Histogram
+	consensusRoundsTotal   prometheus.Counter // 총 합의 라운드
+	consensusDuration      prometheus.Histogram // 합의 소유 시간
 	currentBlockHeight     prometheus.Gauge
 	currentView            prometheus.Gauge
 

@@ -110,67 +110,47 @@
 
 **코드 경로:**
 ```go
-// node/node.go - NewNodeWithABCI()
-func NewNodeWithABCI(config *Config) (*Node, error) {
+// node/node.go - NewNode() / NewNodeWithABCI()
+func NewNode(config *Config) (*Node, error) {
     // 설정 검증
     if err := config.Validate(); err != nil {
         return nil, fmt.Errorf("invalid config: %w", err)
     }
 
-    // 컨텍스트 설정
-    ctx, cancel := context.WithCancel(context.Background())
-
-    // ABCI 어댑터 생성
-    abciAdapter, err := pbft.NewABCIAdapter(config.ABCIAddr)
+    // gRPC Transport 생성
+    trans, err := transport.NewGRPCTransport(config.NodeID, config.ListenAddr)
     if err != nil {
-        cancel()
-        return nil, fmt.Errorf("failed to create ABCI adapter: %w", err)
+        return nil, fmt.Errorf("failed to create transport: %w", err)
     }
 
-    // Mempool 생성
-    mempoolConfig := mempool.DefaultConfig()
-    mp := mempool.NewMempool(mempoolConfig)
+    // Validator Set 생성
+    validatorSet := types.NewValidatorSet(config.Validators)
 
-    // CheckTx 콜백 설정
-    mp.SetCheckTxCallback(func(tx []byte) error {
-        return abciAdapter.CheckTx(ctx, tx)
-    })
-
-    // Reactor 생성
-    reactorConfig := mempool.DefaultReactorConfig()
-    reactor := mempool.NewReactor(mp, reactorConfig)
-
-    // Transport 생성
-    transportConfig := transport.DefaultGRPCTransportConfig()
-    transportConfig.ListenAddr = config.ListenAddr
-    trans := transport.NewGRPCTransport(config.NodeID, transportConfig)
-
-    // PBFT Engine 생성
-    engineConfig := &pbft.EngineConfig{
+    // PBFT Configuration 생성
+    pbftConfig := &pbft.Config{
         NodeID:             config.NodeID,
-        Validators:         config.Validators,
         RequestTimeout:     config.RequestTimeout,
         ViewChangeTimeout:  config.ViewChangeTimeout,
         CheckpointInterval: config.CheckpointInterval,
+        WindowSize:         config.WindowSize,
     }
-    engine := pbft.NewEngine(engineConfig)
 
     // 메트릭 생성
-    var metricsServer *metrics.Server
+    var m *metrics.Metrics
     if config.MetricsEnabled {
-        metricsServer = metrics.NewServer(config.MetricsAddr)
+        m = metrics.NewMetrics("pbft")
     }
+
+    // PBFT Engine 생성
+    engine := pbft.NewEngine(pbftConfig, validatorSet, trans, nil, m)
 
     return &Node{
         config:    config,
-        abci:      abciAdapter,
-        mempool:   mp,
-        reactor:   reactor,
-        transport: trans,
         engine:    engine,
-        metrics:   metricsServer,
-        ctx:       ctx,
-        cancel:    cancel,
+        transport: trans,
+        metrics:   m,
+        done:      make(chan struct{}),
+        logger:    log.Default(),
     }, nil
 }
 ```
@@ -224,58 +204,55 @@ func NewNodeWithABCI(config *Config) (*Node, error) {
 **코드 경로:**
 ```go
 // node/node.go - Start()
-func (n *Node) Start() error {
+func (n *Node) Start(ctx context.Context) error {
     n.mu.Lock()
-    defer n.mu.Unlock()
-
-    if n.isRunning {
-        return nil
+    if n.running {
+        n.mu.Unlock()
+        return fmt.Errorf("node already running")
     }
+    n.running = true
+    n.mu.Unlock()
+
+    n.logger.Printf("[Node] Starting PBFT node %s", n.config.NodeID)
 
     // 1. Transport 시작
     if err := n.transport.Start(); err != nil {
         return fmt.Errorf("failed to start transport: %w", err)
     }
+    n.logger.Printf("[Node] Transport started on %s", n.config.ListenAddr)
 
-    // 2. 피어 연결
-    for _, peer := range n.config.Peers {
-        peerID, addr := parsePeerAddr(peer)
-        if err := n.transport.AddPeer(peerID, addr); err != nil {
-            fmt.Printf("[Node] Failed to connect to peer %s: %v\n",
-                peerID, err)
+    // 2. 피어 연결 (형식: nodeID@address)
+    for _, peerStr := range n.config.Peers {
+        parts := strings.SplitN(peerStr, "@", 2)
+        if len(parts) != 2 {
+            n.logger.Printf("[Node] Invalid peer format: %s", peerStr)
+            continue
+        }
+        peerID, peerAddr := parts[0], parts[1]
+
+        // 자기 자신은 건너뜀
+        if peerID == n.config.NodeID {
+            continue
+        }
+
+        if err := n.transport.AddPeer(peerID, peerAddr); err != nil {
+            n.logger.Printf("[Node] Failed to connect to peer %s: %v", peerID, err)
+        } else {
+            n.logger.Printf("[Node] Connected to peer %s at %s", peerID, peerAddr)
         }
     }
 
-    // 3. 메시지 핸들러 설정
-    n.transport.SetMessageHandler(n.handleMessage)
-
-    // 4. Mempool 시작
-    if err := n.mempool.Start(); err != nil {
-        return fmt.Errorf("failed to start mempool: %w", err)
+    // 3. Metrics 서버 시작 (별도 고루틴)
+    if n.config.MetricsEnabled && n.metrics != nil {
+        go n.startMetricsServer()
     }
 
-    // 5. Reactor 시작
-    n.reactor.SetBroadcaster(n.transport)
-    if err := n.reactor.Start(); err != nil {
-        return fmt.Errorf("failed to start reactor: %w", err)
-    }
-
-    // 6. PBFT Engine 시작
+    // 4. PBFT Engine 시작
     if err := n.engine.Start(); err != nil {
         return fmt.Errorf("failed to start engine: %w", err)
     }
 
-    // 7. Metrics 서버 시작
-    if n.metrics != nil {
-        if err := n.metrics.Start(); err != nil {
-            fmt.Printf("[Node] Failed to start metrics: %v\n", err)
-        }
-    }
-
-    n.isRunning = true
-    fmt.Printf("[Node] %s started on %s\n",
-        n.config.NodeID, n.config.ListenAddr)
-
+    n.logger.Printf("[Node] PBFT node %s started successfully", n.config.NodeID)
     return nil
 }
 ```
@@ -326,50 +303,30 @@ func (n *Node) Start() error {
 // node/node.go - Stop()
 func (n *Node) Stop() error {
     n.mu.Lock()
-    defer n.mu.Unlock()
-
-    if !n.isRunning {
+    if !n.running {
+        n.mu.Unlock()
         return nil
     }
+    n.running = false
+    n.mu.Unlock()
 
-    // 컨텍스트 취소
-    n.cancel()
+    n.logger.Printf("[Node] Stopping PBFT node %s", n.config.NodeID)
 
-    // 역순으로 종료
+    // done 채널 닫기
+    close(n.done)
 
     // 1. Metrics 서버 종료
-    if n.metrics != nil {
-        n.metrics.Stop()
+    if n.metricsServer != nil {
+        n.metricsServer.Close()
     }
 
     // 2. PBFT Engine 종료
-    if err := n.engine.Stop(); err != nil {
-        fmt.Printf("[Node] Engine stop error: %v\n", err)
-    }
+    n.engine.Stop()
 
-    // 3. Reactor 종료
-    if err := n.reactor.Stop(); err != nil {
-        fmt.Printf("[Node] Reactor stop error: %v\n", err)
-    }
+    // 3. Transport 종료
+    n.transport.Stop()
 
-    // 4. Mempool 종료
-    if err := n.mempool.Stop(); err != nil {
-        fmt.Printf("[Node] Mempool stop error: %v\n", err)
-    }
-
-    // 5. Transport 종료
-    if err := n.transport.Stop(); err != nil {
-        fmt.Printf("[Node] Transport stop error: %v\n", err)
-    }
-
-    // 6. ABCI 연결 종료
-    if err := n.abci.Close(); err != nil {
-        fmt.Printf("[Node] ABCI close error: %v\n", err)
-    }
-
-    n.isRunning = false
-    fmt.Printf("[Node] %s stopped\n", n.config.NodeID)
-
+    n.logger.Printf("[Node] PBFT node %s stopped", n.config.NodeID)
     return nil
 }
 ```
@@ -531,13 +488,13 @@ func loadConfig() (*node.Config, error) {
 }
 
 // 검증자 파일 로드
-func loadValidatorsFromFile(path string) ([]*pbft.ValidatorInfo, error) {
+func loadValidatorsFromFile(path string) ([]*types.Validator, error) {
     data, err := os.ReadFile(path)
     if err != nil {
         return nil, err
     }
 
-    var validators []*pbft.ValidatorInfo
+    var validators []*types.Validator
     if err := json.Unmarshal(data, &validators); err != nil {
         return nil, err
     }

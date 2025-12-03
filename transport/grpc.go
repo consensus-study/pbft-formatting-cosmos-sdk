@@ -15,43 +15,57 @@ import (
 
 	pbftv1 "github.com/ahwlsqja/pbft-cosmos/api/pbft/v1"
 	"github.com/ahwlsqja/pbft-cosmos/consensus/pbft"
+	"github.com/ahwlsqja/pbft-cosmos/types"
 )
 
-// GRPCTransport implements gRPC-based P2P communication for PBFT.
+// StateProvider 상태 동기화를 위한 데이터 제공 인터페이스
+type StateProvider interface {
+	// GetBlocksFromHeight 지정된 높이부터 블록들을 반환
+	GetBlocksFromHeight(fromHeight uint64) []*types.Block
+	// GetCheckpoints 저장된 체크포인트들을 반환
+	GetCheckpoints() []pbft.Checkpoint
+	// GetCheckpoint 특정 시퀀스 번호의 체크포인트 반환
+	GetCheckpoint(seqNum uint64) (*pbft.Checkpoint, bool)
+}
+
+// GRPCTransport 함축함 gRPC-based P2P communication for PBFT.
 type GRPCTransport struct {
 	mu sync.RWMutex
 
-	nodeID   string
-	address  string
-	server   *grpc.Server
-	listener net.Listener
+	nodeID   string // 노드 ID
+	address  string // 리스너 주소
+	server   *grpc.Server // gRPC 서버
+	listener net.Listener // TCP 리스너
 
 	// Peer connections
-	peers map[string]*peerConn
+	peers map[string]*peerConn // nodeID -> peerConn
 
 	// Message handler callback
-	msgHandler func(*pbft.Message)
+	msgHandler func(*pbft.Message) // 메시지 핸들러
+
+	// State provider for sync operations
+	stateProvider StateProvider // 상태 동기화용 데이터 제공자
 
 	// Running state
-	running bool
-	done    chan struct{}
+	running bool // 실행 상태
+	done    chan struct{} // 종료 채널
 
-	// Embed the unimplemented server for forward compatibility
+	// 임배드 서버
 	pbftv1.UnimplementedPBFTServiceServer
 }
 
-// peerConn represents a connection to a peer node.
+// peerConn 피어 노드와의 커넥션을 나타냄
 type peerConn struct {
-	id     string
-	addr   string
-	conn   *grpc.ClientConn
-	client pbftv1.PBFTServiceClient
+	id     string // 피어 노드 ID
+	addr   string // 피어 주소
+	conn   *grpc.ClientConn // gRPC 연결
+	client pbftv1.PBFTServiceClient // gRPC 클라이언트
 }
 
-// GRPCTransportConfig holds configuration for the gRPC transport.
+// GRPCTransportConfig gRPC 전송을 위한 설정을 나타냅니다.
 type GRPCTransportConfig struct {
-	NodeID  string
-	Address string
+	NodeID  string // 노드 ID
+	Address string // 리슨 주소
 }
 
 // NewGRPCTransport creates a new gRPC-based transport.
@@ -232,6 +246,13 @@ func (t *GRPCTransport) SetMessageHandler(handler func(*pbft.Message)) {
 	t.msgHandler = handler
 }
 
+// SetStateProvider sets the state provider for sync operations.
+func (t *GRPCTransport) SetStateProvider(provider StateProvider) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.stateProvider = provider
+}
+
 // GetPeers returns the list of connected peer IDs.
 func (t *GRPCTransport) GetPeers() []string {
 	t.mu.RLock()
@@ -296,18 +317,69 @@ func (t *GRPCTransport) MessageStream(stream pbftv1.PBFTService_MessageStreamSer
 }
 
 // SyncState handles state synchronization requests.
+// 새로운 노드가 네트워크에 참여할 때 기존 블록과 체크포인트를 동기화합니다.
 func (t *GRPCTransport) SyncState(ctx context.Context, req *pbftv1.SyncStateRequest) (*pbftv1.SyncStateResponse, error) {
-	// TODO: Implement state synchronization
+	t.mu.RLock()
+	provider := t.stateProvider
+	t.mu.RUnlock()
+
+	// StateProvider가 설정되지 않은 경우 빈 응답 반환
+	if provider == nil {
+		return &pbftv1.SyncStateResponse{
+			Blocks:      []*pbftv1.Block{},
+			Checkpoints: []*pbftv1.Checkpoint{},
+		}, nil
+	}
+
+	// 요청된 높이부터 블록들 조회
+	blocks := provider.GetBlocksFromHeight(req.FromHeight)
+	protoBlocks := make([]*pbftv1.Block, 0, len(blocks))
+	for _, b := range blocks {
+		protoBlocks = append(protoBlocks, typesBlockToProto(b))
+	}
+
+	// 체크포인트들 조회
+	checkpoints := provider.GetCheckpoints()
+	protoCheckpoints := make([]*pbftv1.Checkpoint, 0, len(checkpoints))
+	for _, cp := range checkpoints {
+		protoCheckpoints = append(protoCheckpoints, &pbftv1.Checkpoint{
+			SequenceNum: cp.SequenceNum,
+			Digest:      cp.Digest,
+			NodeId:      cp.NodeID,
+		})
+	}
+
 	return &pbftv1.SyncStateResponse{
-		Blocks:      []*pbftv1.Block{},
-		Checkpoints: []*pbftv1.Checkpoint{},
+		Blocks:      protoBlocks,
+		Checkpoints: protoCheckpoints,
 	}, nil
 }
 
 // GetCheckpoint handles checkpoint requests.
+// 특정 시퀀스 번호의 체크포인트를 조회합니다.
 func (t *GRPCTransport) GetCheckpoint(ctx context.Context, req *pbftv1.GetCheckpointRequest) (*pbftv1.GetCheckpointResponse, error) {
-	// TODO: Implement checkpoint retrieval
-	return &pbftv1.GetCheckpointResponse{}, nil
+	t.mu.RLock()
+	provider := t.stateProvider
+	t.mu.RUnlock()
+
+	// StateProvider가 설정되지 않은 경우 빈 응답 반환
+	if provider == nil {
+		return &pbftv1.GetCheckpointResponse{}, nil
+	}
+
+	// 특정 시퀀스 번호의 체크포인트 조회
+	checkpoint, found := provider.GetCheckpoint(req.SequenceNum)
+	if !found {
+		return &pbftv1.GetCheckpointResponse{}, nil
+	}
+
+	return &pbftv1.GetCheckpointResponse{
+		Checkpoint: &pbftv1.Checkpoint{
+			SequenceNum: checkpoint.SequenceNum,
+			Digest:      checkpoint.Digest,
+			NodeId:      checkpoint.NodeID,
+		},
+	}, nil
 }
 
 // GetStatus returns the current node status.
@@ -409,3 +481,30 @@ type TransportInterface interface {
 
 // Ensure GRPCTransport implements TransportInterface
 var _ TransportInterface = (*GRPCTransport)(nil)
+
+// typesBlockToProto converts a types.Block to protobuf Block format.
+func typesBlockToProto(b *types.Block) *pbftv1.Block {
+	if b == nil {
+		return nil
+	}
+
+	// 트랜잭션들을 바이트 슬라이스로 변환
+	txs := make([][]byte, 0, len(b.Transactions))
+	for _, tx := range b.Transactions {
+		txs = append(txs, tx.Data)
+	}
+
+	return &pbftv1.Block{
+		Header: &pbftv1.BlockHeader{
+			Height:    b.Header.Height,
+			Timestamp: timestamppb.New(b.Header.Timestamp),
+			PrevHash:  b.Header.PrevHash,
+			TxHash:    b.Header.TxRoot,
+			StateHash: b.Header.StateRoot,
+			Proposer:  b.Header.ProposerID,
+			View:      b.Header.View,
+		},
+		Txs:  txs,
+		Hash: b.Hash,
+	}
+}

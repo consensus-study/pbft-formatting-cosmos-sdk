@@ -13,8 +13,8 @@ import (
 
 // KeyPair represents an ECDSA key pair.
 type KeyPair struct {
-	PrivateKey *ecdsa.PrivateKey
-	PublicKey  *ecdsa.PublicKey
+	PrivateKey *ecdsa.PrivateKey // ECDSA P-256 개인키
+	PublicKey  *ecdsa.PublicKey // 공개키
 }
 
 // Signature represents a digital signature.

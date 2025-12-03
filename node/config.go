@@ -4,7 +4,7 @@ package node
 import (
 	"time"
 
-	"github.com/ahwlsqja/pbft-cosmos/consensus/pbft"
+	"github.com/ahwlsqja/pbft-cosmos/types"
 )
 
 // Config holds configuration for a PBFT node.
@@ -21,7 +21,7 @@ type Config struct {
 	Peers []string
 
 	// 검증자 목록
-	Validators []*pbft.ValidatorInfo
+	Validators []*types.Validator
 
 	// 타이밍
 	RequestTimeout     time.Duration
@@ -48,7 +48,7 @@ func DefaultConfig() *Config {
 		ListenAddr:         "0.0.0.0:26656",
 		ABCIAddr:           "localhost:26658",
 		Peers:              []string{},
-		Validators:         []*pbft.ValidatorInfo{},
+		Validators:         []*types.Validator{},
 		RequestTimeout:     5 * time.Second,
 		ViewChangeTimeout:  10 * time.Second,
 		CheckpointInterval: 100,

@@ -203,19 +203,16 @@ func (m *Mempool) addTxLocked(tx *Tx) error {
     // 2. senderIndex에 추가
     m.senderIndex[tx.Sender] = append(m.senderIndex[tx.Sender], tx)
 
-    // 3. 우선순위 큐에 추가 (GasPrice 기준)
-    heap.Push(m.txQueue, tx)
+    // 3. 바이트 수 및 카운트 업데이트
+    m.txCount++
+    m.txBytes += int64(len(tx.Data))
 
-    // 4. 바이트 수 업데이트
-    m.currentBytes += int64(len(tx.Data))
-
-    // 5. 메트릭 업데이트
-    if m.metrics != nil {
-        m.metrics.TxCount.Inc()
-        m.metrics.MempoolSize.Set(float64(len(m.txStore)))
+    // 4. 발신자 nonce 업데이트
+    if tx.Nonce > m.senderNonce[tx.Sender] {
+        m.senderNonce[tx.Sender] = tx.Nonce
     }
 
-    // 6. 새 트랜잭션 채널 알림
+    // 5. 새 트랜잭션 채널 알림
     select {
     case m.newTxCh <- tx:
     default:
@@ -225,35 +222,32 @@ func (m *Mempool) addTxLocked(tx *Tx) error {
 }
 ```
 
-### 3.3 우선순위 큐 (GasPrice 정렬)
+### 3.3 ABCI 2.0 설계 철학 - FIFO 저장
 
-```go
-// 우선순위 큐 구현 (heap.Interface)
-type priorityQueue []*Tx
+**핵심 개념:**
+- **Mempool**: FIFO 순서로 트랜잭션 저장 (단순성, O(1) 삽입)
+- **PrepareProposal**: ABCI 앱에서 트랜잭션 정렬/필터링 담당 (유연성)
 
-func (pq priorityQueue) Len() int { return len(pq) }
-
-func (pq priorityQueue) Less(i, j int) bool {
-    // GasPrice 높은 순서로 정렬
-    return pq[i].GasPrice > pq[j].GasPrice
-}
-
-func (pq priorityQueue) Swap(i, j int) {
-    pq[i], pq[j] = pq[j], pq[i]
-}
-
-func (pq *priorityQueue) Push(x interface{}) {
-    *pq = append(*pq, x.(*Tx))
-}
-
-func (pq *priorityQueue) Pop() interface{} {
-    old := *pq
-    n := len(old)
-    x := old[n-1]
-    *pq = old[0 : n-1]
-    return x
-}
 ```
+┌─────────────────────────────────────────────────────────────────┐
+│              ABCI 2.0 TRANSACTION ORDERING                      │
+│                                                                  │
+│  Mempool (FIFO)          ABCI App (PrepareProposal)            │
+│  ┌─────────────┐         ┌─────────────────────────┐           │
+│  │ Tx1 (t=0)   │         │ 1. 가스 가격으로 정렬    │           │
+│  │ Tx2 (t=1)   │ ─────►  │ 2. 발신자별 nonce 검증   │           │
+│  │ Tx3 (t=2)   │         │ 3. 의존성 순서 처리      │           │
+│  │ ...         │         │ 4. 최종 트랜잭션 목록    │           │
+│  └─────────────┘         └─────────────────────────┘           │
+│                                                                  │
+│  단순 저장               비즈니스 로직 적용                     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+이 접근법의 장점:
+- 합의 엔진과 애플리케이션 로직의 분리
+- 앱별 맞춤형 트랜잭션 정렬 가능
+- CometBFT 방식과 일관성 유지
 
 ## 4. 블록 제안 시 트랜잭션 수집
 

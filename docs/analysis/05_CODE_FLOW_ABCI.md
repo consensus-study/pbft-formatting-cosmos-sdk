@@ -118,13 +118,12 @@ func (a *ABCIAdapter) InitChain(ctx context.Context, chainID string,
 
     a.chainID = chainID
 
-    // Validator를 ABCI 타입으로 변환
+    // Validator를 ABCI 타입으로 변환 (CometBFT v0.38.x 형식)
     abciValidators := make([]abci.ValidatorUpdate, len(validators))
     for i, v := range validators {
         abciValidators[i] = abci.ValidatorUpdate{
-            PubKey: abci.PubKey{
-                Type: "ed25519",
-                Data: v.PublicKey,
+            PubKey: crypto.PublicKey{
+                Sum: &crypto.PublicKey_Ed25519{Ed25519: v.PublicKey},
             },
             Power: v.Power,
         }

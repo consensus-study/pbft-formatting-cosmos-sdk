@@ -437,16 +437,100 @@ service PBFTService {
     rpc SendMessage(SendRequest) returns (SendResponse);
 
     // 양방향 스트리밍 (메인 통신 채널)
-    rpc StreamMessages(stream PBFTMessage) returns (stream PBFTMessage);
+    rpc MessageStream(stream PBFTMessage) returns (stream PBFTMessage);
 
     // 상태 동기화
-    rpc SyncState(SyncRequest) returns (SyncResponse);
+    rpc SyncState(SyncStateRequest) returns (SyncStateResponse);
 
     // 체크포인트 조회
-    rpc GetCheckpoint(CheckpointRequest) returns (CheckpointResponse);
+    rpc GetCheckpoint(GetCheckpointRequest) returns (GetCheckpointResponse);
 
     // 상태 조회
-    rpc GetStatus(StatusRequest) returns (StatusResponse);
+    rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+}
+```
+
+### 4.3 StateProvider 인터페이스
+
+상태 동기화를 위해 GRPCTransport는 StateProvider 인터페이스를 통해 Engine으로부터 데이터를 제공받습니다:
+
+```go
+// transport/grpc.go - StateProvider
+type StateProvider interface {
+    // GetBlocksFromHeight 지정된 높이부터 블록들을 반환
+    GetBlocksFromHeight(fromHeight uint64) []*types.Block
+    // GetCheckpoints 저장된 체크포인트들을 반환
+    GetCheckpoints() []pbft.Checkpoint
+    // GetCheckpoint 특정 시퀀스 번호의 체크포인트 반환
+    GetCheckpoint(seqNum uint64) (*pbft.Checkpoint, bool)
+}
+
+// GRPCTransport 구조체에 stateProvider 필드 추가
+type GRPCTransport struct {
+    // ...기존 필드들...
+    stateProvider StateProvider
+}
+
+// SetStateProvider - StateProvider 설정
+func (t *GRPCTransport) SetStateProvider(provider StateProvider) {
+    t.mu.Lock()
+    defer t.mu.Unlock()
+    t.stateProvider = provider
+}
+```
+
+### 4.4 SyncState/GetCheckpoint 구현
+
+```go
+// transport/grpc.go - SyncState()
+func (t *GRPCTransport) SyncState(ctx context.Context,
+    req *pbftv1.SyncStateRequest) (*pbftv1.SyncStateResponse, error) {
+
+    t.mu.RLock()
+    provider := t.stateProvider
+    t.mu.RUnlock()
+
+    if provider == nil {
+        return &pbftv1.SyncStateResponse{
+            Blocks:      []*pbftv1.Block{},
+            Checkpoints: []*pbftv1.Checkpoint{},
+        }, nil
+    }
+
+    // 요청된 높이부터 블록들 조회
+    blocks := provider.GetBlocksFromHeight(req.FromHeight)
+    // ... 변환 로직 ...
+
+    return &pbftv1.SyncStateResponse{
+        Blocks:      protoBlocks,
+        Checkpoints: protoCheckpoints,
+    }, nil
+}
+
+// transport/grpc.go - GetCheckpoint()
+func (t *GRPCTransport) GetCheckpoint(ctx context.Context,
+    req *pbftv1.GetCheckpointRequest) (*pbftv1.GetCheckpointResponse, error) {
+
+    t.mu.RLock()
+    provider := t.stateProvider
+    t.mu.RUnlock()
+
+    if provider == nil {
+        return &pbftv1.GetCheckpointResponse{}, nil
+    }
+
+    checkpoint, found := provider.GetCheckpoint(req.SequenceNum)
+    if !found {
+        return &pbftv1.GetCheckpointResponse{}, nil
+    }
+
+    return &pbftv1.GetCheckpointResponse{
+        Checkpoint: &pbftv1.Checkpoint{
+            SequenceNum: checkpoint.SequenceNum,
+            Digest:      checkpoint.Digest,
+            NodeId:      checkpoint.NodeID,
+        },
+    }, nil
 }
 ```
 
@@ -566,22 +650,30 @@ func (t *GRPCTransport) Send(peerID string, msg *pbftv1.PBFTMessage) error {
 ```go
 // transport/grpc.go - GRPCTransportConfig
 type GRPCTransportConfig struct {
-    ListenAddr     string         // 리슨 주소 "0.0.0.0:26656"
-    MaxMessageSize int            // 최대 메시지 크기 (4MB 기본)
-    DialTimeout    time.Duration  // 연결 타임아웃 (5초)
-    KeepAlive      time.Duration  // Keep-alive 간격 (30초)
-    MaxRetries     int            // 최대 재시도 횟수
-    RetryDelay     time.Duration  // 재시도 간격
+    NodeID  string // 노드 ID
+    Address string // 리슨 주소
 }
 
-func DefaultGRPCTransportConfig() *GRPCTransportConfig {
-    return &GRPCTransportConfig{
-        ListenAddr:     "0.0.0.0:26656",
-        MaxMessageSize: 4 * 1024 * 1024, // 4MB
-        DialTimeout:    5 * time.Second,
-        KeepAlive:      30 * time.Second,
-        MaxRetries:     3,
-        RetryDelay:     1 * time.Second,
-    }
+// GRPCTransport 생성
+func NewGRPCTransport(nodeID, address string) (*GRPCTransport, error) {
+    return &GRPCTransport{
+        nodeID:  nodeID,
+        address: address,
+        peers:   make(map[string]*peerConn),
+        done:    make(chan struct{}),
+    }, nil
 }
+
+// Start()에서 설정되는 gRPC 옵션
+func (t *GRPCTransport) Start() error {
+    // ...
+    t.server = grpc.NewServer(
+        grpc.MaxRecvMsgSize(64 * 1024 * 1024), // 64MB
+        grpc.MaxSendMsgSize(64 * 1024 * 1024),
+    )
+    // ...
+}
+
+// AddPeer()에서 사용하는 연결 타임아웃
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 ```

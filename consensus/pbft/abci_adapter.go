@@ -8,6 +8,7 @@ import (
 	"time"
 
 	abci "github.com/cometbft/cometbft/abci/types"
+	"github.com/cometbft/cometbft/proto/tendermint/crypto"
 
 	abciclient "github.com/ahwlsqja/pbft-cosmos/abci"
 	"github.com/ahwlsqja/pbft-cosmos/types"
@@ -58,9 +59,8 @@ func (a *ABCIAdapter) InitChain(ctx context.Context, chainID string, validators 
 	abciValidators := make([]abci.ValidatorUpdate, len(validators))
 	for i, v := range validators {
 		abciValidators[i] = abci.ValidatorUpdate{
-			PubKey: abci.PubKey{
-				Type: "ed25519",
-				Data: v.PublicKey,
+			PubKey: crypto.PublicKey{
+				Sum: &crypto.PublicKey_Ed25519{Ed25519: v.PublicKey},
 			},
 			Power: v.Power,
 		}
