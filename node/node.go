@@ -30,14 +30,14 @@ type Node struct {
 	metrics   *metrics.Metrics          // 매트릭
 
 	// State
-	running bool
-	done    chan struct{}
+	running bool // 실행상태
+	done    chan struct{} // 종료 채널
 
 	// Logger
-	logger *log.Logger
+	logger *log.Logger // 로거
 
 	// Metrics HTTP server
-	metricsServer *http.Server
+	metricsServer *http.Server // 매트릭 서버
 }
 
 // NewNode creates a new PBFT node.
@@ -337,12 +337,14 @@ func (n *Node) startMetricsServer() {
 
 // SubmitTx submits a transaction to the node.
 // 트랜잭션을 Mempool에 추가하고, 리더인 경우 블록 제안을 트리거합니다.
+// 맨 처음의 트랜잭션 진입점 
 func (n *Node) SubmitTx(tx []byte, clientID string) error {
 	// Mempool이 있으면 먼저 추가
 	if n.mempool != nil {
 		if err := n.mempool.AddTxWithMeta(tx, clientID, 0, 0, 0); err != nil {
 			return fmt.Errorf("failed to add tx to mempool: %w", err)
 		}
+		// mempool.go 의 line[268~344]에 있음.
 		n.logger.Printf("[Node] Transaction added to mempool (size: %d)", n.mempool.Size())
 
 		// 리더인 경우 블록 제안 트리거

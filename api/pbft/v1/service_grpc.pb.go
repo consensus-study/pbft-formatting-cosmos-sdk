@@ -11,11 +11,11 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// PBFTServiceClient is the client API for PBFTService service.
+// 서버 인터페이스
 type PBFTServiceClient interface {
-	// BroadcastMessage broadcasts a message to all peers.
+	// 메시지 브로드캐스트
 	BroadcastMessage(ctx context.Context, in *BroadcastMessageRequest, opts ...grpc.CallOption) (*BroadcastMessageResponse, error)
-	// SendMessage sends a message to a specific node.
+	// 특정 노드에 메시지 전송
 	SendMessage(ctx context.Context, in *SendMessageRequest, opts ...grpc.CallOption) (*SendMessageResponse, error)
 	// MessageStream creates a bidirectional message stream.
 	MessageStream(ctx context.Context, opts ...grpc.CallOption) (PBFTService_MessageStreamClient, error)
@@ -112,15 +112,15 @@ func (c *pBFTServiceClient) GetStatus(ctx context.Context, in *GetStatusRequest,
 	return out, nil
 }
 
-// PBFTServiceServer is the server API for PBFTService service.
+// 서버 인터페이스
 type PBFTServiceServer interface {
-	// BroadcastMessage broadcasts a message to all peers.
+	// 모든 피어에게 PBFT 메시지 브로드 캐스트
 	BroadcastMessage(context.Context, *BroadcastMessageRequest) (*BroadcastMessageResponse, error)
-	// SendMessage sends a message to a specific node.
+	// SendMessange - 특정 노드에 PBFT 메시지 전송
 	SendMessage(context.Context, *SendMessageRequest) (*SendMessageResponse, error)
-	// MessageStream creates a bidirectional message stream.
+	// MessageStream - 양방향 메시지 스트림
 	MessageStream(PBFTService_MessageStreamServer) error
-	// SyncState synchronizes state between nodes.
+	// SyncState - 노드 간 상태 동기화 (블록, 체크 포인트)
 	SyncState(context.Context, *SyncStateRequest) (*SyncStateResponse, error)
 	// GetCheckpoint retrieves a checkpoint.
 	GetCheckpoint(context.Context, *GetCheckpointRequest) (*GetCheckpointResponse, error)

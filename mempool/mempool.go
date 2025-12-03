@@ -265,49 +265,63 @@ func (mp *Mempool) AddTx(txBytes []byte) error {
 	return mp.AddTxWithMeta(txBytes, "", 0, 0, 0)
 }
 
-// AddTxWithMeta adds a transaction with metadata.
+// 메타데이터와 함께 트랜잭션 추가. 이미 맴풀이 init 되었기 때문에
+//  현재는 MVP/테스트 단계라서 단순화된 것이고, ABCI 앱과 연동 시 앱이 CheckTx에서 이 검증들을 수행합니다. 즉, Mempool은 단순 저장소 역할이고 실제 검증은 ABCI 앱이 담당하는 ABCI
+// 2.0 설계 철학을 따른 것입니다. 
 func (mp *Mempool) AddTxWithMeta(txBytes []byte, sender string, nonce, gasPrice, gasLimit uint64) error {
+	// 1. 일단 Mempool 접근 쓰레드에 락걸고
 	mp.mu.Lock()
+	// 2. 끝날 때 락풀음
 	defer mp.mu.Unlock()
 
+	// 3. 맴풀이 실행 중이 아닐 때 에러 리턴
 	if !mp.isRunning {
 		return ErrMempoolNotRunning
 	}
 
 	// 메트릭 업데이트
+	// 4-1 매트릭 락걸고
 	mp.metrics.mu.Lock()
+	// 4-2 트랜잭션 받은거 ++ 하고
 	mp.metrics.TxsReceived++
+	// 4-3 락 풀고
 	mp.metrics.mu.Unlock()
 
-	// 1. 크기 체크
+	// 5. 설정에 해놨던 최대 트랜잭션 바이트 크기 체크
 	if len(txBytes) > mp.config.MaxTxBytes {
+		// 크기를 넘어가면 트랜잭션 리젝함
 		mp.rejectTx()
 		return fmt.Errorf("%w: size %d > max %d", ErrTxTooLarge, len(txBytes), mp.config.MaxTxBytes)
 	}
 
-	// 2. 트랜잭션 생성
+	// 6. 트랜잭션 생성 tx.go line[44]에 있음
+	// 그냥 tx 데이터 자체를 한번 해시하고 그 나머지 데이터들 메타데이터로 넣어서 tx 객체 만든거임
 	tx := NewTxWithMeta(txBytes, sender, nonce, gasPrice, gasLimit)
+	// 맴풀에 있는 블록 높이 꺼내서 tx.Height에 저장함
 	tx.Height = mp.height
 
-	// 3. 중복 체크
+	// 7. 중복 체크
+	// 현재 txStore (맴풀 구조체에서 txHash: 데이터 이런 데이터 형식으로 있는 자료 구조에서 중복되는 키가 존재하면)
+	// 에러 rejectTx 발생함 -> ErrTxAlreadyExists
 	if _, exists := mp.txStore[tx.ID]; exists {
 		mp.rejectTx()
 		return ErrTxAlreadyExists
+		// mempool.go 에 line[52]
 	}
 
-	// 4. 최근 제거된 트랜잭션 체크
+	// 8. 최근 제거된 트랜잭션 체크
 	if _, removed := mp.recentlyRemoved[tx.ID]; removed {
 		mp.rejectTx()
 		return ErrTxAlreadyExists
 	}
 
-	// 5. 최소 가스 가격 체크
+	// 9. 최소 가스 가격 체크 설정해둔 MinGasPrice 보다 작으면 rejectTx
 	if gasPrice < mp.config.MinGasPrice {
 		mp.rejectTx()
 		return fmt.Errorf("%w: price %d < min %d", ErrInsufficientGas, gasPrice, mp.config.MinGasPrice)
 	}
 
-	// 6. Nonce 체크 (sender가 있는 경우)
+	// 10. Nonce 체크 (sender가 있는 경우) line[360]에 있음
 	if sender != "" {
 		if err := mp.checkNonce(sender, nonce); err != nil {
 			mp.rejectTx()
@@ -343,14 +357,17 @@ func (mp *Mempool) AddTxWithMeta(txBytes []byte, sender string, nonce, gasPrice,
 	return nil
 }
 
-// checkNonce validates the transaction nonce.
+// checkNonce는 트랜잭션 nonce를 검증하는 메서드임(샌더랑 논스 받음)
 func (mp *Mempool) checkNonce(sender string, nonce uint64) error {
+	// 1. senderNonce에 sender 키가 없으면 !exist 이고 첫 트랜잭션임.
+	// 따라서 nonce가 0이므로 return nil
 	lastNonce, exists := mp.senderNonce[sender]
 	if !exists {
 		// 첫 트랜잭션
 		return nil
 	}
 
+	// 2. 받은 nonce가 lastNonce 보다 작거나 같으면 에러. 왜냐하면 nonce 마지막 nonce보다 작으면 그건 말이안됨
 	if nonce <= lastNonce {
 		return fmt.Errorf("%w: got %d, expected > %d", ErrLowNonce, nonce, lastNonce)
 	}

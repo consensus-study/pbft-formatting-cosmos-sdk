@@ -17,21 +17,21 @@ type Metrics struct {
 	// Consensus metrics
 	consensusRoundsTotal   prometheus.Counter // 총 합의 라운드
 	consensusDuration      prometheus.Histogram // 합의 소유 시간
-	currentBlockHeight     prometheus.Gauge
-	currentView            prometheus.Gauge
+	currentBlockHeight     prometheus.Gauge // 현재 블록 높이
+	currentView            prometheus.Gauge // 현 뷰 번호
 
 	// Message metrics
-	messagesSentTotal     *prometheus.CounterVec
-	messagesReceivedTotal *prometheus.CounterVec
-	messageProcessingTime *prometheus.HistogramVec
+	messagesSentTotal     *prometheus.CounterVec // 타입별 전송 메시지 수
+	messagesReceivedTotal *prometheus.CounterVec // 타입별 수신 메시지 수
+	messageProcessingTime *prometheus.HistogramVec // 메시지 처리 시간
 
 	// View change metrics
-	viewChangesTotal prometheus.Counter
+	viewChangesTotal prometheus.Counter // 뷰 변경 횟수
 
 	// Block metrics
-	blockExecutionTime prometheus.Histogram
-	transactionsTotal  prometheus.Counter
-	tps                prometheus.Gauge
+	blockExecutionTime prometheus.Histogram	// 블록 실행 시간
+	transactionsTotal  prometheus.Counter // 총 트랜잭션 수
+	tps                prometheus.Gauge // 초당 트랜잭션ㅁ
 
 	// Internal tracking
 	roundStartTimes map[uint64]time.Time
@@ -211,7 +211,7 @@ func (m *Metrics) AddTransactions(count int) {
 	m.mu.Unlock()
 }
 
-// Server provides an HTTP server for Prometheus metrics.
+// Server provides 프로메테우스 매트릭을 위한 HTTP 서버를 제공
 type Server struct {
 	addr   string
 	server *http.Server
