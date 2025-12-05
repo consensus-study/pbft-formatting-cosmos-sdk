@@ -23,7 +23,7 @@ type Node struct {
 	mu sync.RWMutex
 
 	config    *Config                   // 설정
-	engine    *pbft.Engine              // PBFT 엔진
+	engine    pbft.ConsensusEngine      // PBFT 엔진 (인터페이스 사용)
 	transport *transport.GRPCTransport  // P2P 통신
 	mempool   *mempool.Mempool          // 트랜잭션 풀
 	reactor   *mempool.Reactor          // Mempool 네트워크 리액터
@@ -40,7 +40,8 @@ type Node struct {
 	metricsServer *http.Server // 매트릭 서버
 }
 
-// NewNode creates a new PBFT node.
+// NewNode creates a new PBFT node using EngineV2 with NoopABCIAdapter.
+// ABCI 앱 없이 노드를 실행할 때 사용합니다.
 func NewNode(config *Config) (*Node, error) {
 	// Validate config
 	if err := config.Validate(); err != nil {
@@ -79,8 +80,14 @@ func NewNode(config *Config) (*Node, error) {
 	reactorConfig := mempool.DefaultReactorConfig()
 	reactor := mempool.NewReactor(mp, reactorConfig)
 
-	// Create PBFT engine
-	engine := pbft.NewEngine(pbftConfig, validatorSet, trans, nil, m)
+	// Create Noop ABCI adapter (ABCI 앱 없이 실행)
+	noopAdapter := pbft.NewNoopABCIAdapter()
+
+	// Create PBFT EngineV2 with Noop adapter
+	engine, err := pbft.NewEngineV2(pbftConfig, validatorSet, trans, noopAdapter, m)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create engine v2: %w", err)
+	}
 
 	// Connect Mempool to Engine
 	engine.SetMempool(mp)
@@ -98,6 +105,7 @@ func NewNode(config *Config) (*Node, error) {
 }
 
 // NewNodeWithABCI creates a new PBFT node with ABCI adapter.
+// Cosmos SDK 앱과 연동할 때 사용합니다.
 func NewNodeWithABCI(config *Config) (*Node, error) {
 	// Validate config
 	if err := config.Validate(); err != nil {
@@ -142,22 +150,14 @@ func NewNodeWithABCI(config *Config) (*Node, error) {
 		return nil, fmt.Errorf("failed to create ABCI adapter: %w", err)
 	}
 
-	// Create PBFT engine V2 with ABCI support
-	engineV2, err := pbft.NewEngineV2(pbftConfig, validatorSet, trans, abciAdapter, m)
+	// Create PBFT EngineV2 with ABCI support
+	engine, err := pbft.NewEngineV2(pbftConfig, validatorSet, trans, abciAdapter, m)
 	if err != nil {
 		abciAdapter.Close()
 		return nil, fmt.Errorf("failed to create engine v2: %w", err)
 	}
 
 	// Connect Mempool to EngineV2
-	engineV2.SetMempool(mp)
-
-	// We need to wrap engineV2 for compatibility
-	// For now, use the regular engine for basic functionality
-	engine := pbft.NewEngine(pbftConfig, validatorSet, trans, nil, m)
-	_ = engineV2 // TODO: 향후 EngineV2를 직접 사용하도록 리팩토링 필요
-
-	// Connect Mempool to Engine (기존 Engine도 Mempool 연결 유지)
 	engine.SetMempool(mp)
 
 	return &Node{

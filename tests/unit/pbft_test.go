@@ -288,9 +288,14 @@ func TestEngineCreation(t *testing.T) {
 
 	config := pbft.DefaultConfig("node1")
 	transport := network.NewMockTransport("node1", []string{"node2", "node3", "node4"})
-	app := abci.NewApplication()
 
-	engine := pbft.NewEngine(config, vs, transport, app, nil)
+	// Use NoopABCIAdapter instead of Application (EngineV2 requires ABCI adapter)
+	noopAdapter := pbft.NewNoopABCIAdapter()
+
+	engine, err := pbft.NewEngineV2(config, vs, transport, noopAdapter, nil)
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
 
 	if engine == nil {
 		t.Error("engine should not be nil")

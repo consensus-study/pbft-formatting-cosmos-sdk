@@ -11,7 +11,7 @@ import (
 	"github.com/ahwlsqja/pbft-cosmos/abci"
 	"github.com/ahwlsqja/pbft-cosmos/consensus/pbft"
 	"github.com/ahwlsqja/pbft-cosmos/crypto"
-	"github.com/ahwlsqja/pbft-cosmos/network"
+	_ "github.com/ahwlsqja/pbft-cosmos/network" // 아직 다른 테스트에서 사용될 수 있음
 	"github.com/ahwlsqja/pbft-cosmos/types"
 )
 
@@ -161,7 +161,7 @@ func BenchmarkAppExecuteBlock(b *testing.B) {
 
 // SimulatedNetwork provides a simulated network for testing.
 type SimulatedNetwork struct {
-	nodes     map[string]*pbft.Engine
+	nodes     map[string]*pbft.EngineV2
 	transport map[string]*SimulatedTransport
 	mu        sync.RWMutex
 }
@@ -206,7 +206,7 @@ func (st *SimulatedTransport) SetMessageHandler(handler func(*pbft.Message)) {
 // NewSimulatedNetwork creates a new simulated network.
 func NewSimulatedNetwork(nodeCount int) *SimulatedNetwork {
 	sn := &SimulatedNetwork{
-		nodes:     make(map[string]*pbft.Engine),
+		nodes:     make(map[string]*pbft.EngineV2),
 		transport: make(map[string]*SimulatedTransport),
 	}
 
@@ -232,9 +232,11 @@ func NewSimulatedNetwork(nodeCount int) *SimulatedNetwork {
 
 		config := pbft.DefaultConfig(nodeID)
 		config.ViewChangeTimeout = 30 * time.Second // Longer timeout for tests
-		app := abci.NewApplication()
 
-		engine := pbft.NewEngine(config, vs, st, app, nil)
+		// Use NoopABCIAdapter instead of Application (EngineV2 requires ABCI adapter)
+		noopAdapter := pbft.NewNoopABCIAdapter()
+
+		engine, _ := pbft.NewEngineV2(config, vs, st, noopAdapter, nil)
 		sn.nodes[nodeID] = engine
 	}
 

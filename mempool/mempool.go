@@ -550,18 +550,24 @@ func (mp *Mempool) removeTxLocked(txID string, addToCache bool) {
 func (mp *Mempool) ReapMaxTxs(max int) []*Tx {
 	// 읽기 락
 	mp.mu.RLock()
+	// 끝날 때 락 풀음
 	defer mp.mu.RUnlock()
 
+	// max가 양수가 아니고 거나 최대대체트랜잭션 개수보다 크면
+	// max은 최대 트랜잭션 개수로 정함
 	if max <= 0 || max > mp.config.MaxBatchTxs {
 		max = mp.config.MaxBatchTxs
 	}
 
+	// 맴풀의 트랜잭션 카운터가 0이면 nil 반환
 	if mp.txCount == 0 {
 		return nil
 	}
 
 	// FIFO 순서로 트랜잭션 반환 (Timestamp 기준)
+	// 값이 전부 0인 mp.txCount 크기인배열 생성
 	txs := make([]*Tx, 0, mp.txCount)
+	// 맴풀의 txStore 돌면서 txs에 tx 추가함
 	for _, tx := range mp.txStore {
 		txs = append(txs, tx)
 	}
@@ -579,8 +585,8 @@ func (mp *Mempool) ReapMaxTxs(max int) []*Tx {
 	return txs
 }
 
-// ReapMaxBytes returns transactions up to maxBytes in FIFO order.
-// Sorting/filtering should be done by the ABCI app in PrepareProposal.
+// ReapMaxBytes는 트랜잭션이 FIFO 순서 안에서 최대 바이트로 가는것을 리턴함
+// 정렬/필터는 PrepareProposal 안에서 ABCI app에서 처리됨
 func (mp *Mempool) ReapMaxBytes(maxBytes int64) []*Tx {
 	mp.mu.RLock()
 	defer mp.mu.RUnlock()

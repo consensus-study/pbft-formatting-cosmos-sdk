@@ -169,8 +169,10 @@ func (e *EngineV2) run() {
 		case <-e.ctx.Done():
 			return
 		case msg := <-e.msgChan:
+			// 메시지 왔을 때 handleMessage 실행함
 			e.handleMessage(msg)
 		case req := <-e.requestChan:
+			// 리더 노드일 경우 블록 제안
 			if e.isPrimary() {
 				e.proposeBlock(req)
 			}
@@ -189,7 +191,9 @@ func (e *EngineV2) handleIncomingMessage(msg *Message) {
 
 // handleMessage - 메시지 처리
 func (e *EngineV2) handleMessage(msg *Message) {
+	// 시작 시간 찍음
 	startTime := time.Now()
+	// 이 함수 끝날 때 time.Since(startTime)이 함수 종료 시점에 계산되게 할려고 함.
 	defer func() {
 		if e.metrics != nil {
 			e.metrics.RecordMessageProcessingTime(msg.Type.String(), time.Since(startTime))
@@ -199,14 +203,19 @@ func (e *EngineV2) handleMessage(msg *Message) {
 
 	switch msg.Type {
 	case PrePrepare:
+		// 메시지의 타입이 Preprepare을 받은 것일 때
 		e.handlePrePrepare(msg)
 	case Prepare:
-		e.handlePrepare(msg)
+		// 메시지의 타입이 prepare을 받을 것일 때
+		e.handlePrepare(msg) 
 	case Commit:
+		// 메시지의 타입이 commit을 받을 것일 때
 		e.handleCommit(msg)
 	case ViewChange:
+		// 메시지의 타입이 viewchange을 받을 것일 때
 		e.handleViewChange(msg)
 	case NewView:
+		// 메시지의 타입이 newchange을 받을 것일 때
 		e.handleNewView(msg)
 	default:
 		e.logger.Printf("[PBFT-V2] Unknown message type: %v", msg.Type)
@@ -231,7 +240,8 @@ func (e *EngineV2) getPrimaryID() string {
 	return e.validatorSet.Validators[primaryIdx].ID
 }
 
-// proposeBlock - 블록 제안 (리더만, ABCI PrepareProposal 사용)
+// proposeBlock - 블록 제안 (리더만, ABCI PrepareProposal 사용) -> prepropare 과정임.
+// 리더가 나머지 노드한테 prepropare 브로드캐스트함. 처음 과정
 func (e *EngineV2) proposeBlock(req *RequestMsg) {
 	// 락 걸고
 	e.mu.Lock()
@@ -254,6 +264,7 @@ func (e *EngineV2) proposeBlock(req *RequestMsg) {
 
 	// 트랜잭션 수집 - Mempool에서 가져오거나, 없으면 단일 요청 사용
 	var txs [][]byte
+	// 맴풀이 존재하면
 	if mp != nil {
 		// Mempool에서 최대 500개 트랜잭션을 FIFO 순서로 가져옴 abci에서 하고 블록 정렬하고 하는건 앱단에서 함.
 		mempoolTxs := mp.ReapMaxTxs(500)
@@ -279,24 +290,33 @@ func (e *EngineV2) proposeBlock(req *RequestMsg) {
 		return
 	}
 
-	// ABCI PrepareProposal 호출 - 앱에게 트랜잭션 정렬/필터링 요청
+	// ABCI PrepareProposal 호출 - 앱에게 트랜잭션 정렬/필터링 요청 사실상 엔진에서는 맴풀에 트랜잭션 모아놓고 제안할 때 던져준다음에 순서 정렬 시킨다 왜? 상태가 앱에 있으니까 
+	// 1) 5초 타임 아웃 컨텍스트를 생성한다고 생각하면 된다
 	ctx, cancel := context.WithTimeout(e.ctx, 5*time.Second)
+	// 2) 함수 종료시 컨텍스트 취소
 	defer cancel()
 
+	// 3) 제안자 ID를 바이트로 변환
 	proposer := []byte(e.config.NodeID)
+	// 4) ABCI 앱에 요청
 	preparedTxs, err := e.abciAdapter.PrepareProposal(ctx, int64(seqNum), proposer, txs)
 	if err != nil {
 		e.logger.Printf("[PBFT-V2] PrepareProposal failed: %v", err)
 		return
 	}
 
-	// 블록 생성
+	// 5) 블록 생성
+	// 이건 이전 블록의 해시임.
 	var prevHash []byte
+	// 엔진의 커밋된 블록이 존재하면 
+	// 그 커밋된 블록의 해쉬를 prevHash에 저장함. 그니까 마지막 확정 블록 해쉬를 꺼내는 거임.
+	// 왜냐하면 블록체인은 이전해시를 참조하는 식으로 링크드리스트가 되기 때문이다.
 	if len(e.committedBlocks) > 0 {
 		prevHash = e.committedBlocks[len(e.committedBlocks)-1].Hash
 	}
 
 	// 트랜잭션 변환
+	// ABCI 앱에서 받은 raw bytes를 Transaction 구조체로 변환한다고 보면된다.
 	transactions := make([]types.Transaction, len(preparedTxs))
 	for i, txBytes := range preparedTxs {
 		transactions[i] = types.Transaction{
@@ -306,6 +326,7 @@ func (e *EngineV2) proposeBlock(req *RequestMsg) {
 		}
 	}
 
+	// 새로운 블록 생성함
 	block := types.NewBlock(seqNum, prevHash, e.config.NodeID, view, transactions)
 
 	// PrePrepare 메시지 생성 및 저장
@@ -314,11 +335,14 @@ func (e *EngineV2) proposeBlock(req *RequestMsg) {
 	state := e.stateLog.GetState(view, seqNum)
 	state.SetPrePrepare(prePrepareMsg, block)
 
-	// 브로드캐스트
+	// 페이로드 만들라고 마샬링
 	payload, _ := json.Marshal(prePrepareMsg)
+	// 새로운 메시지 말들어서
 	msg := NewMessage(PrePrepare, view, seqNum, block.Hash, e.config.NodeID)
+	// 페이로드에 넣고 
 	msg.Payload = payload
 
+	// 브로드 캐스트
 	e.broadcast(msg)
 
 	e.logger.Printf("[PBFT-V2] Primary broadcast PRE-PREPARE for seq %d with %d txs", seqNum, len(transactions))
@@ -330,17 +354,18 @@ func (e *EngineV2) proposeBlock(req *RequestMsg) {
 
 // handlePrePrepare - PrePrepare 메시지 처리 (ABCI ProcessProposal 사용)
 func (e *EngineV2) handlePrePrepare(msg *Message) {
-	// 1. 리더 확인
+	// 1. 리더 확인 -> 리더가 보낸건지
 	if msg.NodeID != e.getPrimaryID() {
 		e.logger.Printf("[PBFT-V2] Received PRE-PREPARE from non-primary %s", msg.NodeID)
 		return
 	}
 
+	// 읽기 락
 	e.mu.RLock()
 	currentView := e.view
 	e.mu.RUnlock()
 
-	// 2. 뷰 확인
+	// 2. 뷰 확인 -> 현재 뷰가 몇 인지
 	if msg.View != currentView {
 		return
 	}
@@ -944,4 +969,56 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// StateProvider 인터페이스 구현 - ConsensusEngine 인터페이스 충족을 위해 추가
+
+// GetBlocksFromHeight returns blocks from the specified height.
+// 지정된 높이부터 커밋된 블록들을 반환합니다.
+func (e *EngineV2) GetBlocksFromHeight(fromHeight uint64) []*types.Block {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	var result []*types.Block
+	for _, block := range e.committedBlocks {
+		if block.Header.Height >= fromHeight {
+			result = append(result, block)
+		}
+	}
+	return result
+}
+
+// GetCheckpoints returns all stored checkpoints.
+// 저장된 모든 체크포인트를 반환합니다.
+func (e *EngineV2) GetCheckpoints() []Checkpoint {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	checkpoints := make([]Checkpoint, 0, len(e.checkpoints))
+	for seqNum, digest := range e.checkpoints {
+		checkpoints = append(checkpoints, Checkpoint{
+			SequenceNum: seqNum,
+			Digest:      digest,
+			NodeID:      e.config.NodeID,
+		})
+	}
+	return checkpoints
+}
+
+// GetCheckpoint returns the checkpoint for a specific sequence number.
+// 특정 시퀀스 번호의 체크포인트를 반환합니다.
+func (e *EngineV2) GetCheckpoint(seqNum uint64) (*Checkpoint, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	digest, exists := e.checkpoints[seqNum]
+	if !exists {
+		return nil, false
+	}
+
+	return &Checkpoint{
+		SequenceNum: seqNum,
+		Digest:      digest,
+		NodeID:      e.config.NodeID,
+	}, true
 }
