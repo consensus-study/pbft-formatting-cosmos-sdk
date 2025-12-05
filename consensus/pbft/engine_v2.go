@@ -382,16 +382,28 @@ func (e *EngineV2) handlePrePrepare(msg *Message) {
 		return
 	}
 
-	// 5. ABCI ProcessProposal 호출 - 블록 검증
+	// 5. ABCI ProcessProposal 호출 - 블록 검증 5초 컨텍스트 정의한거임
 	ctx, cancel := context.WithTimeout(e.ctx, 5*time.Second)
+	// 끝날 때 cancel
 	defer cancel()
 
+	// 6. ABCI 로 부터온 트랜잭션 형식을 엔진에 맞게 바꾼다. 왜나하면 engine -> engine으로 전파될거니까
+	// prePrepareMsg.Block.Transactions는 []types.Transaction 타입인데, ABCI의 ProcessProposal은 [][]받기 때무에 변환이 필요한거임
+	// 그리고 [][]byte에 대한 설명은 이거 자체가 2차원 바이트 배열이다. 
+	// txs 라는 트랜잭션들을 담는 배열이 있을 테고 
+	// txs[0] = []byte{0x01, 0x02, 0x03} 
+	// txs[1] = []byte{0x04, 0x05}
+	// txs[2] = []byte{0x06, 0x07, 0x08}
+	// 이런식으로 되어있는 것이다.
+	// 이렇게 하면 각 트랜잭션의 구조를 모르고도 raw 바이트로 주고 받을 수 있어서 이렇게 한다.
 	txs := make([][]byte, len(prePrepareMsg.Block.Transactions))
 	for i, tx := range prePrepareMsg.Block.Transactions {
 		txs[i] = tx.Data
 	}
 
+	// 제안자도 byte 형태로 만듬
 	proposer := []byte(prePrepareMsg.PrimaryID)
+	// 앱에 요청 이게 이름이 좀 헷갈리는데 리더로 부터 prepropared 메시지 받으면 그거 검증할라고 앱단에 보내는 함수임.
 	accepted, err := e.abciAdapter.ProcessProposal(
 		ctx,
 		int64(msg.SequenceNum),
@@ -399,6 +411,7 @@ func (e *EngineV2) handlePrePrepare(msg *Message) {
 		txs,
 		msg.Digest,
 	)
+	
 	if err != nil {
 		e.logger.Printf("[PBFT-V2] ProcessProposal error: %v", err)
 		return
@@ -409,7 +422,7 @@ func (e *EngineV2) handlePrePrepare(msg *Message) {
 		return
 	}
 
-	// StateLog에 저장
+	// StateLog에 저장 엔진의 상태를 업데이트 왜냐? 성공적으로 보내고 검증했으니까
 	state := e.stateLog.GetState(msg.View, msg.SequenceNum)
 	state.SetPrePrepare(&prePrepareMsg, prePrepareMsg.Block)
 
