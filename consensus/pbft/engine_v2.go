@@ -233,13 +233,20 @@ func (e *EngineV2) getPrimaryID() string {
 
 // proposeBlock - 블록 제안 (리더만, ABCI PrepareProposal 사용)
 func (e *EngineV2) proposeBlock(req *RequestMsg) {
+	// 락 걸고
 	e.mu.Lock()
+	// 엔진의 블록높이 +1
 	e.sequenceNum++
+	// seqNum에 값 복사
 	seqNum := e.sequenceNum
+	// view에 값 복사
 	view := e.view
+	// mempool 복사
 	mp := e.mempool
+	// 락 풀음
 	e.mu.Unlock()
 
+	// 만약 IsInWindow
 	if !e.stateLog.IsInWindow(seqNum) {
 		e.logger.Printf("[PBFT-V2] Sequence number %d out of window", seqNum)
 		return
@@ -248,11 +255,13 @@ func (e *EngineV2) proposeBlock(req *RequestMsg) {
 	// 트랜잭션 수집 - Mempool에서 가져오거나, 없으면 단일 요청 사용
 	var txs [][]byte
 	if mp != nil {
-		// Mempool에서 최대 500개 트랜잭션을 FIFO 순서로 가져옴
+		// Mempool에서 최대 500개 트랜잭션을 FIFO 순서로 가져옴 abci에서 하고 블록 정렬하고 하는건 앱단에서 함.
 		mempoolTxs := mp.ReapMaxTxs(500)
+		// txs 에 쌓음
 		for _, tx := range mempoolTxs {
 			txs = append(txs, tx.Data)
 		}
+		
 		e.logger.Printf("[PBFT-V2] Reaped %d txs from mempool for block %d", len(txs), seqNum)
 	}
 
@@ -336,18 +345,19 @@ func (e *EngineV2) handlePrePrepare(msg *Message) {
 		return
 	}
 
+	// 3. 컨텍스트 윈도우 확인
 	if !e.stateLog.IsInWindow(msg.SequenceNum) {
 		return
 	}
 
-	// 3. 메시지 디코딩
+	// 4. 메시지 디코딩
 	var prePrepareMsg PrePrepareMsg
 	if err := json.Unmarshal(msg.Payload, &prePrepareMsg); err != nil {
 		e.logger.Printf("[PBFT-V2] Failed to decode PRE-PREPARE: %v", err)
 		return
 	}
 
-	// 4. ABCI ProcessProposal 호출 - 블록 검증
+	// 5. ABCI ProcessProposal 호출 - 블록 검증
 	ctx, cancel := context.WithTimeout(e.ctx, 5*time.Second)
 	defer cancel()
 

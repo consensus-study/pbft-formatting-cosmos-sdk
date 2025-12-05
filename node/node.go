@@ -340,7 +340,7 @@ func (n *Node) startMetricsServer() {
 
 // SubmitTx submits a transaction to the node.
 // 트랜잭션을 Mempool에 추가하고, 리더인 경우 블록 제안을 트리거합니다.
-// 맨 처음의 트랜잭션 진입점 
+// 맨 처음의 트랜잭션 진입점
 func (n *Node) SubmitTx(tx []byte, clientID string) error {
 	// Mempool이 있으면 먼저 추가
 	if n.mempool != nil {
@@ -351,13 +351,20 @@ func (n *Node) SubmitTx(tx []byte, clientID string) error {
 		n.logger.Printf("[Node] Transaction added to mempool (size: %d)", n.mempool.Size())
 
 		// 리더인 경우 블록 제안 트리거
+		// 주의: SubmitRequest는 블록 제안을 트리거만 함
+		// 실제 트랜잭션은 proposeBlock()에서 mempool.ReapMaxTxs()로 가져옴
 		if n.engine.IsPrimary() {
+			// nil을 전달해도 됨 - proposeBlock에서 Mempool을 사용하기 때문
+			// 하지만 호환성을 위해 tx를 전달 (Mempool이 비어있을 때 fallback용)
 			return n.engine.SubmitRequest(tx, clientID)
+
+			// SubmitReuqest는 그냥 채널에 tx를 넣는 역할임
+			// SubmitRequest -> proposeBlock이 캐시함
 		}
 		return nil
 	}
 
-	// Mempool 없으면 직접 엔진에 전달
+	// Mempool 없으면 직접 엔진에 전달 (단일 tx만 처리됨)
 	return n.engine.SubmitRequest(tx, clientID)
 }
 

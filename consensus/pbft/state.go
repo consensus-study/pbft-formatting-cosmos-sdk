@@ -172,18 +172,20 @@ func (s *State) GetPhase() Phase {
 	return s.Phase
 }
 
-// StateLog maintains consensus states for multiple sequence numbers.
+// StateLog는 다중 시퀸스 번호를 위한 시퀸스 상태를 유지한다.
 type StateLog struct {
+	// 읽기 락
 	mu     sync.RWMutex
+	// 상태는 주소 배열임
 	states map[uint64]*State
 
-	// Low water mark - states below this can be garbage collected
+	// 최소한의 워터마크 [1, ..... ,19] 이라고 치면 1을 말하는듯 컨텍스트 윈도우 시작 
 	LowWaterMark uint64
 
-	// High water mark - maximum sequence number we can accept
+	// High water mark - 수용할 수 있는 최대한의 시퀸스 넘버
 	HighWaterMark uint64
 
-	// Window size for state management
+	// 상태 관리를 위한 윈도우 사이즈
 	WindowSize uint64
 }
 
@@ -219,11 +221,14 @@ func (sl *StateLog) GetExistingState(seqNum uint64) *State {
 	return sl.states[seqNum]
 }
 
-// IsInWindow checks if a sequence number is within the acceptable window.
+// IsInWindow checks 시퀸스 번호가 수용가능한 윈도우에 있는지 확인하는 함수
 func (sl *StateLog) IsInWindow(seqNum uint64) bool {
+	// 읽기 락걸고
 	sl.mu.RLock()
+	// 끝날때 풀음
 	defer sl.mu.RUnlock()
 
+	// 만약 시퀸스 넘버가 수용가능 범위 내에 있는지 boolean으로 return함
 	return seqNum > sl.LowWaterMark && seqNum <= sl.HighWaterMark
 }
 

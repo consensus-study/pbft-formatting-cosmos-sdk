@@ -544,10 +544,11 @@ func (mp *Mempool) removeTxLocked(txID string, addToCache bool) {
 ================================================================================
 */
 
-// ReapMaxTxs returns up to max transactions for block proposal.
-// Returns transactions in FIFO order (arrival time).
-// Sorting/filtering should be done by the ABCI app in PrepareProposal.
+// ReapMaxTxs 블록 제안에 필요한 최대 트랜잭션 return 함
+// Returns FIIO로 도착한 순서대로 return함
+// 정렬/필터링은 ABCI app 에서 PreparePropasal 에서 이미 끝나야함.
 func (mp *Mempool) ReapMaxTxs(max int) []*Tx {
+	// 읽기 락
 	mp.mu.RLock()
 	defer mp.mu.RUnlock()
 
