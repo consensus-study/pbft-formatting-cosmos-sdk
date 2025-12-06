@@ -232,7 +232,7 @@ func (t *Transport) Connect(peerID, address string) error {
 	return nil
 }
 
-// Broadcast sends a message to all connected peers.
+// Broadcast 모든 연결된 피어들에게 메시지를 전송함
 func (t *Transport) Broadcast(msg *pbft.Message) error {
 	t.mu.RLock()
 	peers := make([]*Peer, 0, len(t.peers))
@@ -265,16 +265,65 @@ func (t *Transport) Send(nodeID string, msg *pbft.Message) error {
 	return t.sendToPeer(peer, msg)
 }
 
-// sendToPeer sends a message to a specific peer.
+// sendToPeer 한 특정한 노드에게 메시지를 TCP 소켓을 통해 전송함
+//
+// [네트워크 전송 원리 - 로우 레벨 설명]
+//
+// 1. peer.conn은 net.Conn 타입 (TCP 소켓 연결)
+//    - net.Dial() 또는 listener.Accept()로 생성된 실제 TCP 연결
+//    - 운영체제 커널의 소켓 파일 디스크립터(fd)를 래핑한 객체
+//
+// 2. json.NewEncoder(peer.conn) 동작 원리:
+//    - peer.conn은 io.Writer 인터페이스를 구현함 (Write([]byte) 메서드 보유)
+//    - Encoder는 내부적으로 이 Writer를 저장하고, Encode() 호출 시 여기에 씀
+//
+// 3. encoder.Encode(msg) 실행 시 내부 동작:
+//    a) msg 구조체를 JSON 바이트로 직렬화 (예: {"type":1,"view":0,...})
+//    b) 직렬화된 바이트를 peer.conn.Write(bytes)로 전달
+//    c) net.Conn.Write()는 내부적으로 syscall.Write() 호출
+//    d) 커널이 TCP 송신 버퍼에 데이터를 복사
+//    e) TCP/IP 스택이 패킷을 만들어 네트워크 인터페이스로 전송
+//    f) 상대방 피어의 TCP 수신 버퍼에 도착
+//
+// [데이터 흐름]
+//
+//   Go 애플리케이션                    운영체제 커널                   네트워크
+//   ┌─────────────┐                 ┌─────────────┐              ┌─────────┐
+//   │ msg 구조체   │                 │ TCP 송신버퍼 │              │  이더넷  │
+//   │     ↓       │                 │     ↓       │              │   카드   │
+//   │ JSON 직렬화  │ ──Write()───▶  │  TCP 세그먼트 │ ──────────▶ │    ↓    │
+//   │     ↓       │   (syscall)    │     생성     │              │ 상대 피어 │
+//   │ []byte 데이터│                 │     ↓       │              │   수신   │
+//   └─────────────┘                 │  IP 패킷화   │              └─────────┘
+//                                   └─────────────┘
+//
+// [왜 Encode()가 전송인가?]
+//
+// json.Encoder는 "어디에 쓸지"를 생성자에서 받음
+// - json.NewEncoder(os.Stdout)  → 표준출력에 씀
+// - json.NewEncoder(file)       → 파일에 씀
+// - json.NewEncoder(peer.conn)  → TCP 소켓에 씀 = 네트워크 전송!
+//
+// 즉, Encode()는 "직렬화 + Write()"를 한 번에 수행하는 함수
+// peer.conn에 Write하면 TCP 스택을 타고 상대방에게 전송됨
 func (t *Transport) sendToPeer(peer *Peer, msg *pbft.Message) error {
+	// 동시에 같은 연결에 쓰는 것을 방지하기 위한 뮤텍스 잠금
+	// TCP는 바이트 스트림이므로, 동시 쓰기 시 메시지가 섞일 수 있음
 	peer.mu.Lock()
 	defer peer.mu.Unlock()
 
+	// 연결이 끊어졌는지 확인
 	if peer.conn == nil {
 		return fmt.Errorf("no connection to peer %s", peer.ID)
 	}
 
+	// peer.conn(TCP 소켓)에 JSON을 쓰는 Encoder 생성
+	// 이 시점에서는 아직 아무것도 전송되지 않음
 	encoder := json.NewEncoder(peer.conn)
+
+	// Encode() 호출 = JSON 직렬화 + TCP 소켓에 Write = 네트워크 전송
+	// 이 한 줄이 실행되면 바이트가 커널 TCP 버퍼로 들어가고,
+	// TCP/IP 스택이 패킷을 만들어 상대방에게 실제로 전송함
 	return encoder.Encode(msg)
 }
 

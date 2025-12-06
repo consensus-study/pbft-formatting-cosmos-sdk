@@ -354,7 +354,7 @@ func (e *EngineV2) proposeBlock(req *RequestMsg) {
 
 // handlePrePrepare - PrePrepare 메시지 처리 (ABCI ProcessProposal 사용)
 func (e *EngineV2) handlePrePrepare(msg *Message) {
-	// 1. 리더 확인 -> 리더가 보낸건지
+	// 1. 리더 확인 -> 리더가 보낸건지 왜냐하면 PrePrepare은 리더만 보낼 수 있음.
 	if msg.NodeID != e.getPrimaryID() {
 		e.logger.Printf("[PBFT-V2] Received PRE-PREPARE from non-primary %s", msg.NodeID)
 		return
@@ -362,7 +362,9 @@ func (e *EngineV2) handlePrePrepare(msg *Message) {
 
 	// 읽기 락
 	e.mu.RLock()
+	// 현재 뷰 
 	currentView := e.view
+	// 읽기 락 풀음
 	e.mu.RUnlock()
 
 	// 2. 뷰 확인 -> 현재 뷰가 몇 인지
@@ -440,35 +442,49 @@ func (e *EngineV2) handlePrePrepare(msg *Message) {
 
 // handlePrepare - Prepare 메시지 처리
 func (e *EngineV2) handlePrepare(msg *Message) {
+	// 읽기 락
 	e.mu.RLock()
+	// 현재 뷰
 	currentView := e.view
+	// 읽기 언락
 	e.mu.RUnlock()
 
+	// 만약 현재 뷰가 currentView 아니면 리턴
 	if msg.View != currentView {
 		return
 	}
 
+	// prepareMsg 
 	var prepareMsg PrepareMsg
+	// 언마샬링 받은 payload를 에러면 에러 처리
 	if err := json.Unmarshal(msg.Payload, &prepareMsg); err != nil {
 		e.logger.Printf("[PBFT-V2] Failed to decode PREPARE: %v", err)
 		return
 	}
 
+	// 상태 가져옴 그 블록
 	state := e.stateLog.GetExistingState(msg.SequenceNum)
+	// 이전에 handelPrePrepare에서 저장해둔걸 가져오는거임.
 	if state == nil {
 		return
 	}
 
+	// 상태에 prepareMsg 추가함
 	state.AddPrepare(&prepareMsg)
 
+	// 비잔틴 만족하는 최소 개수 세는 함수
 	quorum := e.validatorSet.QuorumSize()
+	// 상태가 IsPrepared 이고 상태가 GetPhase 이면 
 	if state.IsPrepared(quorum) && state.GetPhase() == PrePrepared {
+		// 상태를 Phase 상태를 Prepared로 바꿈.
 		state.TransitionToPrepared()
 
+		// 새로운 커밋 메시지를 생성함.
 		commitMsg := NewCommitMsg(msg.View, msg.SequenceNum, msg.Digest, e.config.NodeID)
+		// json 마샬링을 함.
 		payload, _ := json.Marshal(commitMsg)
 		commitNetMsg := NewMessage(Commit, msg.View, msg.SequenceNum, msg.Digest, e.config.NodeID)
-		commitNetMsg.Payload = payload
+		commitNetMsg.Payload = payload 
 
 		e.broadcast(commitNetMsg)
 
@@ -893,6 +909,7 @@ func (e *EngineV2) resetViewChangeTimer() {
 	})
 }
 
+// 브로드 캐스트 함수
 func (e *EngineV2) broadcast(msg *Message) {
 	if e.transport != nil {
 		if err := e.transport.Broadcast(msg); err != nil {

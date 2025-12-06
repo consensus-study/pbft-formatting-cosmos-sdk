@@ -138,7 +138,7 @@ type ReplyMsg struct {
 	Result    []byte    `json:"result"`
 }
 
-// NewMessage creates a new PBFT message.
+// NewMessage 새로운 PBFT 메시지를 생성함.
 func NewMessage(msgType MessageType, view, seqNum uint64, digest []byte, nodeID string) *Message {
 	return &Message{
 		Type:        msgType,
@@ -171,13 +171,13 @@ func NewPrepareMsg(view, seqNum uint64, digest []byte, nodeID string) *PrepareMs
 	}
 }
 
-// NewCommitMsg creates a new Commit message.
+// NewCommitMsg 새로운 커밋 메시지를 생성함
 func NewCommitMsg(view, seqNum uint64, digest []byte, nodeID string) *CommitMsg {
 	return &CommitMsg{
-		View:        view,
-		SequenceNum: seqNum,
-		Digest:      digest,
-		NodeID:      nodeID,
+		View:        view, // 현재 뷰
+		SequenceNum: seqNum, // 블록 높이
+		Digest:      digest, // 블록 해시
+		NodeID:      nodeID, // 노드 ID 발신자
 	}
 }
 
