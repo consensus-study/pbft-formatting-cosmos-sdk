@@ -206,3 +206,100 @@ func TimestampToTime(ts *timestamppb.Timestamp) time.Time {
 func TimeToTimestamp(t time.Time) *timestamppb.Timestamp {
 	return timestamppb.New(t)
 }
+
+// ================================================================================
+//                          트랜잭션 브로드캐스트 관련 타입
+// ================================================================================
+
+// TxMessage는 노드 간 트랜잭션 전파를 위한 메시지
+// Mempool에 있는 트랜잭션을 다른 노드에게 전파할 때 사용
+type TxMessage struct {
+	TxData    []byte                 `json:"tx_data,omitempty"`    // 트랜잭션 원본 데이터
+	TxHash    string                 `json:"tx_hash,omitempty"`    // 트랜잭션 해시 (중복 체크용)
+	Sender    string                 `json:"sender,omitempty"`     // 트랜잭션 발신자
+	Nonce     uint64                 `json:"nonce,omitempty"`      // 발신자 nonce
+	GasPrice  uint64                 `json:"gas_price,omitempty"`  // 가스 가격
+	GasLimit  uint64                 `json:"gas_limit,omitempty"`  // 가스 한도
+	Timestamp *timestamppb.Timestamp `json:"timestamp,omitempty"`  // 수신 시간
+	FromNode  string                 `json:"from_node,omitempty"`  // 전파한 노드 ID
+}
+
+// BroadcastTxRequest는 트랜잭션 브로드캐스트 요청
+type BroadcastTxRequest struct {
+	Tx *TxMessage `json:"tx,omitempty"` // 전파할 트랜잭션
+}
+
+// BroadcastTxResponse는 트랜잭션 브로드캐스트 응답
+type BroadcastTxResponse struct {
+	Success bool   `json:"success,omitempty"` // 성공 여부
+	Error   string `json:"error,omitempty"`   // 에러 메시지 (실패 시)
+	TxHash  string `json:"tx_hash,omitempty"` // 트랜잭션 해시
+}
+
+// SendTxRequest는 특정 노드에게 트랜잭션 전송 요청
+type SendTxRequest struct {
+	TargetNodeId string     `json:"target_node_id,omitempty"` // 대상 노드 ID
+	Tx           *TxMessage `json:"tx,omitempty"`             // 전송할 트랜잭션
+}
+
+// SendTxResponse는 트랜잭션 전송 응답
+type SendTxResponse struct {
+	Success bool   `json:"success,omitempty"` // 성공 여부
+	Error   string `json:"error,omitempty"`   // 에러 메시지
+}
+
+// GetTxData returns the transaction data.
+func (m *TxMessage) GetTxData() []byte {
+	if m != nil {
+		return m.TxData
+	}
+	return nil
+}
+
+// GetTxHash returns the transaction hash.
+func (m *TxMessage) GetTxHash() string {
+	if m != nil {
+		return m.TxHash
+	}
+	return ""
+}
+
+// GetSender returns the sender.
+func (m *TxMessage) GetSender() string {
+	if m != nil {
+		return m.Sender
+	}
+	return ""
+}
+
+// GetFromNode returns the node that propagated this transaction.
+func (m *TxMessage) GetFromNode() string {
+	if m != nil {
+		return m.FromNode
+	}
+	return ""
+}
+
+// GetTx returns the transaction from broadcast request.
+func (r *BroadcastTxRequest) GetTx() *TxMessage {
+	if r != nil {
+		return r.Tx
+	}
+	return nil
+}
+
+// GetTx returns the transaction from send request.
+func (r *SendTxRequest) GetTx() *TxMessage {
+	if r != nil {
+		return r.Tx
+	}
+	return nil
+}
+
+// GetTargetNodeId returns the target node ID.
+func (r *SendTxRequest) GetTargetNodeId() string {
+	if r != nil {
+		return r.TargetNodeId
+	}
+	return ""
+}
