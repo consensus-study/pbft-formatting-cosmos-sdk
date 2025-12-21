@@ -390,6 +390,184 @@ func (t *GRPCTransport) GetStatus(ctx context.Context, req *pbftv1.GetStatusRequ
 	}, nil
 }
 
+// ================================================================================
+//                          트랜잭션 브로드캐스트 구현
+// ================================================================================
+
+// TxHandler는 수신된 트랜잭션을 처리하는 콜백 함수
+// Mempool에 트랜잭션을 추가하는 용도로 사용됨
+type TxHandler func(txData []byte, sender string, nonce, gasPrice, gasLimit uint64) error
+
+// txHandler는 수신된 트랜잭션을 처리하는 콜백
+var txHandler TxHandler
+
+// SetTxHandler sets the callback for incoming transactions.
+// 노드가 다른 피어로부터 트랜잭션을 수신했을 때 호출됨
+func (t *GRPCTransport) SetTxHandler(handler TxHandler) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	txHandler = handler
+}
+
+// BroadcastTx handles incoming transaction broadcast from peers.
+// 다른 피어가 트랜잭션을 브로드캐스트했을 때 호출됨
+// 수신한 트랜잭션을 로컬 Mempool에 추가함
+func (t *GRPCTransport) BroadcastTx(ctx context.Context, req *pbftv1.BroadcastTxRequest) (*pbftv1.BroadcastTxResponse, error) {
+	if req.Tx == nil {
+		return &pbftv1.BroadcastTxResponse{
+			Success: false,
+			Error:   "transaction is nil",
+		}, nil
+	}
+
+	// 자기 자신이 보낸 트랜잭션은 무시 (루프 방지)
+	if req.Tx.FromNode == t.nodeID {
+		return &pbftv1.BroadcastTxResponse{
+			Success: true,
+			TxHash:  req.Tx.TxHash,
+		}, nil
+	}
+
+	// TxHandler가 설정되어 있으면 트랜잭션 처리
+	if txHandler != nil {
+		err := txHandler(
+			req.Tx.TxData,
+			req.Tx.Sender,
+			req.Tx.Nonce,
+			req.Tx.GasPrice,
+			req.Tx.GasLimit,
+		)
+		if err != nil {
+			return &pbftv1.BroadcastTxResponse{
+				Success: false,
+				Error:   err.Error(),
+				TxHash:  req.Tx.TxHash,
+			}, nil
+		}
+	}
+
+	fmt.Printf("[GRPCTransport] Received tx broadcast from %s: %s\n", req.Tx.FromNode, req.Tx.TxHash)
+
+	return &pbftv1.BroadcastTxResponse{
+		Success: true,
+		TxHash:  req.Tx.TxHash,
+	}, nil
+}
+
+// SendTx handles incoming direct transaction from a peer.
+// 특정 피어가 직접 트랜잭션을 전송했을 때 호출됨
+func (t *GRPCTransport) SendTx(ctx context.Context, req *pbftv1.SendTxRequest) (*pbftv1.SendTxResponse, error) {
+	if req.Tx == nil {
+		return &pbftv1.SendTxResponse{
+			Success: false,
+			Error:   "transaction is nil",
+		}, nil
+	}
+
+	// TxHandler가 설정되어 있으면 트랜잭션 처리
+	if txHandler != nil {
+		err := txHandler(
+			req.Tx.TxData,
+			req.Tx.Sender,
+			req.Tx.Nonce,
+			req.Tx.GasPrice,
+			req.Tx.GasLimit,
+		)
+		if err != nil {
+			return &pbftv1.SendTxResponse{
+				Success: false,
+				Error:   err.Error(),
+			}, nil
+		}
+	}
+
+	fmt.Printf("[GRPCTransport] Received tx from %s: %s\n", req.Tx.FromNode, req.Tx.TxHash)
+
+	return &pbftv1.SendTxResponse{
+		Success: true,
+	}, nil
+}
+
+// BroadcastTransaction broadcasts a transaction to all connected peers.
+// 로컬에서 수신한 트랜잭션을 모든 피어에게 전파함
+func (t *GRPCTransport) BroadcastTransaction(txData []byte, txHash, sender string, nonce, gasPrice, gasLimit uint64) error {
+	t.mu.RLock()
+	peers := make([]*peerConn, 0, len(t.peers))
+	for _, peer := range t.peers {
+		peers = append(peers, peer)
+	}
+	t.mu.RUnlock()
+
+	txMsg := &pbftv1.TxMessage{
+		TxData:    txData,
+		TxHash:    txHash,
+		Sender:    sender,
+		Nonce:     nonce,
+		GasPrice:  gasPrice,
+		GasLimit:  gasLimit,
+		Timestamp: timestamppb.Now(),
+		FromNode:  t.nodeID,
+	}
+
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var lastErr error
+
+	for _, peer := range peers {
+		wg.Add(1)
+		go func(p *peerConn) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			_, err := p.client.BroadcastTx(ctx, &pbftv1.BroadcastTxRequest{
+				Tx: txMsg,
+			})
+			if err != nil {
+				errMu.Lock()
+				lastErr = err
+				errMu.Unlock()
+				fmt.Printf("[GRPCTransport] BroadcastTx to %s failed: %v\n", p.id, err)
+			}
+		}(peer)
+	}
+	wg.Wait()
+
+	return lastErr
+}
+
+// SendTransaction sends a transaction to a specific peer.
+// 특정 피어에게 트랜잭션을 전송함
+func (t *GRPCTransport) SendTransaction(peerID string, txData []byte, txHash, sender string, nonce, gasPrice, gasLimit uint64) error {
+	t.mu.RLock()
+	peer, exists := t.peers[peerID]
+	t.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("peer %s not found", peerID)
+	}
+
+	txMsg := &pbftv1.TxMessage{
+		TxData:    txData,
+		TxHash:    txHash,
+		Sender:    sender,
+		Nonce:     nonce,
+		GasPrice:  gasPrice,
+		GasLimit:  gasLimit,
+		Timestamp: timestamppb.Now(),
+		FromNode:  t.nodeID,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := peer.client.SendTx(ctx, &pbftv1.SendTxRequest{
+		TargetNodeId: peerID,
+		Tx:           txMsg,
+	})
+	return err
+}
+
 // Helper functions for type conversion
 
 // messageToProto converts a PBFT Message to protobuf format.

@@ -25,6 +25,10 @@ type PBFTServiceClient interface {
 	GetCheckpoint(ctx context.Context, in *GetCheckpointRequest, opts ...grpc.CallOption) (*GetCheckpointResponse, error)
 	// GetStatus returns the node status.
 	GetStatus(ctx context.Context, in *GetStatusRequest, opts ...grpc.CallOption) (*GetStatusResponse, error)
+	// BroadcastTx - 모든 피어에게 트랜잭션 브로드캐스트
+	BroadcastTx(ctx context.Context, in *BroadcastTxRequest, opts ...grpc.CallOption) (*BroadcastTxResponse, error)
+	// SendTx - 특정 피어에게 트랜잭션 전송
+	SendTx(ctx context.Context, in *SendTxRequest, opts ...grpc.CallOption) (*SendTxResponse, error)
 }
 
 type pBFTServiceClient struct {
@@ -112,6 +116,24 @@ func (c *pBFTServiceClient) GetStatus(ctx context.Context, in *GetStatusRequest,
 	return out, nil
 }
 
+func (c *pBFTServiceClient) BroadcastTx(ctx context.Context, in *BroadcastTxRequest, opts ...grpc.CallOption) (*BroadcastTxResponse, error) {
+	out := new(BroadcastTxResponse)
+	err := c.cc.Invoke(ctx, "/pbft.v1.PBFTService/BroadcastTx", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *pBFTServiceClient) SendTx(ctx context.Context, in *SendTxRequest, opts ...grpc.CallOption) (*SendTxResponse, error) {
+	out := new(SendTxResponse)
+	err := c.cc.Invoke(ctx, "/pbft.v1.PBFTService/SendTx", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // 서버 인터페이스
 type PBFTServiceServer interface {
 	// 모든 피어에게 PBFT 메시지 브로드 캐스트
@@ -126,6 +148,10 @@ type PBFTServiceServer interface {
 	GetCheckpoint(context.Context, *GetCheckpointRequest) (*GetCheckpointResponse, error)
 	// GetStatus returns the node status.
 	GetStatus(context.Context, *GetStatusRequest) (*GetStatusResponse, error)
+	// BroadcastTx - 모든 피어에게 트랜잭션 브로드캐스트
+	BroadcastTx(context.Context, *BroadcastTxRequest) (*BroadcastTxResponse, error)
+	// SendTx - 특정 피어에게 트랜잭션 전송
+	SendTx(context.Context, *SendTxRequest) (*SendTxResponse, error)
 	mustEmbedUnimplementedPBFTServiceServer()
 }
 
@@ -149,6 +175,12 @@ func (UnimplementedPBFTServiceServer) GetCheckpoint(context.Context, *GetCheckpo
 }
 func (UnimplementedPBFTServiceServer) GetStatus(context.Context, *GetStatusRequest) (*GetStatusResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetStatus not implemented")
+}
+func (UnimplementedPBFTServiceServer) BroadcastTx(context.Context, *BroadcastTxRequest) (*BroadcastTxResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BroadcastTx not implemented")
+}
+func (UnimplementedPBFTServiceServer) SendTx(context.Context, *SendTxRequest) (*SendTxResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SendTx not implemented")
 }
 func (UnimplementedPBFTServiceServer) mustEmbedUnimplementedPBFTServiceServer() {}
 
@@ -278,6 +310,42 @@ func _PBFTService_GetStatus_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PBFTService_BroadcastTx_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BroadcastTxRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PBFTServiceServer).BroadcastTx(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/pbft.v1.PBFTService/BroadcastTx",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PBFTServiceServer).BroadcastTx(ctx, req.(*BroadcastTxRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PBFTService_SendTx_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SendTxRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PBFTServiceServer).SendTx(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/pbft.v1.PBFTService/SendTx",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PBFTServiceServer).SendTx(ctx, req.(*SendTxRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PBFTService_ServiceDesc is the grpc.ServiceDesc for PBFTService service.
 var PBFTService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "pbft.v1.PBFTService",
@@ -302,6 +370,14 @@ var PBFTService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetStatus",
 			Handler:    _PBFTService_GetStatus_Handler,
+		},
+		{
+			MethodName: "BroadcastTx",
+			Handler:    _PBFTService_BroadcastTx_Handler,
+		},
+		{
+			MethodName: "SendTx",
+			Handler:    _PBFTService_SendTx_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
