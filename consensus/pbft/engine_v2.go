@@ -14,6 +14,7 @@ import (
 
 	"github.com/ahwlsqja/pbft-cosmos/mempool"
 	"github.com/ahwlsqja/pbft-cosmos/metrics"
+	"github.com/ahwlsqja/pbft-cosmos/persistence"
 	"github.com/ahwlsqja/pbft-cosmos/types"
 )
 
@@ -56,6 +57,9 @@ type EngineV2 struct {
 
 	// 체인 정보
 	chainID string
+
+	// Persistence Store (선택적)
+	store persistence.Store
 }
 
 // ABCIAdapterInterface - ABCI 어댑터 인터페이스
@@ -335,11 +339,15 @@ func (e *EngineV2) proposeBlock(req *RequestMsg) {
 	state := e.stateLog.GetState(view, seqNum)
 	state.SetPrePrepare(prePrepareMsg, block)
 
+	// 리더 자신의 PREPARE도 미리 추가 (자신에게는 브로드캐스트가 안 되므로)
+	prepareMsg := NewPrepareMsg(view, seqNum, block.Hash, e.config.NodeID)
+	state.AddPrepare(prepareMsg)
+
 	// 페이로드 만들라고 마샬링
 	payload, _ := json.Marshal(prePrepareMsg)
 	// 새로운 메시지 말들어서
 	msg := NewMessage(PrePrepare, view, seqNum, block.Hash, e.config.NodeID)
-	// 페이로드에 넣고 
+	// 페이로드에 넣고
 	msg.Payload = payload
 
 	// 브로드 캐스트
@@ -434,6 +442,9 @@ func (e *EngineV2) handlePrePrepare(msg *Message) {
 	prepareNetMsg := NewMessage(Prepare, msg.View, msg.SequenceNum, msg.Digest, e.config.NodeID)
 	prepareNetMsg.Payload = payload
 
+	// 자기 자신의 PREPARE도 state에 추가 (브로드캐스트는 자신에게 보내지 않으므로)
+	state.AddPrepare(prepareMsg)
+
 	e.broadcast(prepareNetMsg)
 	e.resetViewChangeTimer()
 
@@ -466,6 +477,8 @@ func (e *EngineV2) handlePrepare(msg *Message) {
 	state := e.stateLog.GetExistingState(msg.SequenceNum)
 	// 이전에 handelPrePrepare에서 저장해둔걸 가져오는거임.
 	if state == nil {
+		e.logger.Printf("[PBFT-V2] Node %s: no state for PREPARE seq %d from %s (no PrePrepare yet)",
+			e.config.NodeID, msg.SequenceNum, prepareMsg.NodeID)
 		return
 	}
 
@@ -474,7 +487,7 @@ func (e *EngineV2) handlePrepare(msg *Message) {
 
 	// 비잔틴 만족하는 최소 개수 세는 함수
 	quorum := e.validatorSet.QuorumSize()
-	// 상태가 IsPrepared 이고 상태가 GetPhase 이면 
+	// 상태가 IsPrepared 이고 상태가 GetPhase 이면
 	if state.IsPrepared(quorum) && state.GetPhase() == PrePrepared {
 		// 상태를 Phase 상태를 Prepared로 바꿈.
 		state.TransitionToPrepared()
@@ -484,7 +497,10 @@ func (e *EngineV2) handlePrepare(msg *Message) {
 		// json 마샬링을 함.
 		payload, _ := json.Marshal(commitMsg)
 		commitNetMsg := NewMessage(Commit, msg.View, msg.SequenceNum, msg.Digest, e.config.NodeID)
-		commitNetMsg.Payload = payload 
+		commitNetMsg.Payload = payload
+
+		// 자기 자신의 COMMIT도 추가 (브로드캐스트는 자신에게 보내지 않으므로)
+		state.AddCommit(commitMsg)
 
 		e.broadcast(commitNetMsg)
 
@@ -511,10 +527,14 @@ func (e *EngineV2) handleCommit(msg *Message) {
 
 	state := e.stateLog.GetExistingState(msg.SequenceNum)
 	if state == nil {
+		e.logger.Printf("[PBFT-V2] Node %s: no state for COMMIT seq %d from %s",
+			e.config.NodeID, msg.SequenceNum, commitMsg.NodeID)
 		return
 	}
 
 	state.AddCommit(&commitMsg)
+	e.logger.Printf("[PBFT-V2] Node %s received COMMIT for seq %d from %s (commits: %d, phase: %v)",
+		e.config.NodeID, msg.SequenceNum, commitMsg.NodeID, state.CommitCount(), state.GetPhase())
 
 	quorum := e.validatorSet.QuorumSize()
 	if state.IsCommitted(quorum) && state.GetPhase() == Prepared {
@@ -577,6 +597,11 @@ func (e *EngineV2) executeBlock(state *State) {
 	e.committedBlocks = append(e.committedBlocks, state.Block)
 	mp := e.mempool
 	e.mu.Unlock()
+
+	// Persistence Store에 블록 저장
+	if err := e.saveBlockToStore(state.Block); err != nil {
+		e.logger.Printf("[PBFT-V2] Failed to save block to store: %v", err)
+	}
 
 	// Mempool에서 커밋된 트랜잭션 제거
 	if mp != nil && len(state.Block.Transactions) > 0 {
@@ -683,9 +708,11 @@ func (e *EngineV2) updateViewChangeQuorum() {
 // createCheckpoint - 체크포인트 생성
 func (e *EngineV2) createCheckpoint(seqNum uint64) {
 	e.mu.Lock()
+	var digest []byte
 	if len(e.committedBlocks) > 0 {
 		lastBlock := e.committedBlocks[len(e.committedBlocks)-1]
 		e.checkpoints[seqNum] = lastBlock.Hash
+		digest = lastBlock.Hash
 	}
 
 	// 오래된 체크포인트 정리
@@ -699,6 +726,21 @@ func (e *EngineV2) createCheckpoint(seqNum uint64) {
 		delete(e.checkpoints, oldestSeq)
 	}
 	e.mu.Unlock()
+
+	// Persistence Store에 체크포인트 저장
+	checkpoint := &Checkpoint{
+		SequenceNum: seqNum,
+		Digest:      digest,
+		NodeID:      e.config.NodeID,
+	}
+	if err := e.saveCheckpointToStore(checkpoint); err != nil {
+		e.logger.Printf("[PBFT-V2] Failed to save checkpoint to store: %v", err)
+	}
+
+	// 상태도 함께 저장
+	if err := e.SaveState(); err != nil {
+		e.logger.Printf("[PBFT-V2] Failed to save state: %v", err)
+	}
 
 	e.stateLog.AdvanceWatermarks(seqNum)
 	e.logger.Printf("[PBFT-V2] Created checkpoint at seq %d", seqNum)
@@ -962,11 +1004,11 @@ func (e *EngineV2) GetCurrentView() uint64 {
 	return e.view
 }
 
-// GetCurrentHeight - 현재 블록 높이 반환
+// GetCurrentHeight - 현재 블록 높이 반환 (커밋된 블록 수 기반)
 func (e *EngineV2) GetCurrentHeight() uint64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.sequenceNum
+	return uint64(len(e.committedBlocks))
 }
 
 // GetCommittedBlocks - 확정된 블록 목록 반환
@@ -1051,4 +1093,169 @@ func (e *EngineV2) GetCheckpoint(seqNum uint64) (*Checkpoint, bool) {
 		Digest:      digest,
 		NodeID:      e.config.NodeID,
 	}, true
+}
+
+// ================================================================================
+//                          Persistence 관련 메서드
+// ================================================================================
+
+// SetStore sets the persistence store.
+// Persistence Store를 설정합니다.
+func (e *EngineV2) SetStore(store persistence.Store) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.store = store
+}
+
+// GetStore returns the persistence store.
+func (e *EngineV2) GetStore() persistence.Store {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.store
+}
+
+// SaveState saves the current consensus state to the store.
+// 현재 합의 상태를 저장소에 저장합니다.
+func (e *EngineV2) SaveState() error {
+	e.mu.RLock()
+	store := e.store
+	if store == nil {
+		e.mu.RUnlock()
+		return nil // store가 없으면 무시
+	}
+
+	state := &persistence.ConsensusState{
+		NodeID:        e.config.NodeID,
+		CurrentView:   e.view,
+		CurrentHeight: uint64(len(e.committedBlocks)),
+		LastAppHash:   e.lastAppHash,
+	}
+	if len(e.committedBlocks) > 0 {
+		state.LastBlockHash = e.committedBlocks[len(e.committedBlocks)-1].Hash
+	}
+	e.mu.RUnlock()
+
+	return store.SaveState(state)
+}
+
+// LoadState loads the consensus state from the store.
+// 저장소에서 합의 상태를 복구합니다.
+func (e *EngineV2) LoadState() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.store == nil {
+		return nil
+	}
+
+	state, err := e.store.LoadState()
+	if err != nil {
+		return fmt.Errorf("failed to load state: %w", err)
+	}
+	if state == nil {
+		return nil // 저장된 상태 없음
+	}
+
+	e.view = state.CurrentView
+	e.lastAppHash = state.LastAppHash
+
+	e.logger.Printf("[PBFT-V2] Loaded state: view=%d, height=%d", state.CurrentView, state.CurrentHeight)
+
+	return nil
+}
+
+// SaveBlock saves a committed block to the store.
+// 커밋된 블록을 저장소에 저장합니다.
+func (e *EngineV2) saveBlockToStore(block *types.Block) error {
+	e.mu.RLock()
+	store := e.store
+	e.mu.RUnlock()
+
+	if store == nil {
+		return nil
+	}
+
+	return store.SaveBlock(block)
+}
+
+// LoadBlocks loads committed blocks from the store.
+// 저장소에서 커밋된 블록들을 복구합니다.
+func (e *EngineV2) LoadBlocks() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.store == nil {
+		return nil
+	}
+
+	latestHeight, err := e.store.GetLatestBlockHeight()
+	if err != nil {
+		return fmt.Errorf("failed to get latest height: %w", err)
+	}
+	if latestHeight == 0 {
+		return nil // 저장된 블록 없음
+	}
+
+	blocks, err := e.store.LoadBlocks(1, latestHeight)
+	if err != nil {
+		return fmt.Errorf("failed to load blocks: %w", err)
+	}
+
+	e.committedBlocks = blocks
+	e.logger.Printf("[PBFT-V2] Loaded %d blocks from store", len(blocks))
+
+	return nil
+}
+
+// Recover recovers the engine state from the store.
+// 저장소에서 엔진 상태를 복구합니다.
+func (e *EngineV2) Recover() error {
+	if e.store == nil {
+		return nil
+	}
+
+	// 상태 복구
+	if err := e.LoadState(); err != nil {
+		return fmt.Errorf("failed to load state: %w", err)
+	}
+
+	// 블록 복구
+	if err := e.LoadBlocks(); err != nil {
+		return fmt.Errorf("failed to load blocks: %w", err)
+	}
+
+	// 체크포인트 복구
+	checkpoints, err := e.store.LoadCheckpoints()
+	if err != nil {
+		return fmt.Errorf("failed to load checkpoints: %w", err)
+	}
+
+	e.mu.Lock()
+	for _, cp := range checkpoints {
+		e.checkpoints[cp.SequenceNum] = cp.Digest
+	}
+	e.mu.Unlock()
+
+	e.logger.Printf("[PBFT-V2] Recovery complete: %d checkpoints loaded", len(checkpoints))
+
+	return nil
+}
+
+// saveCheckpointToStore saves a checkpoint to the store.
+func (e *EngineV2) saveCheckpointToStore(checkpoint *Checkpoint) error {
+	e.mu.RLock()
+	store := e.store
+	e.mu.RUnlock()
+
+	if store == nil {
+		return nil
+	}
+
+	// persistence.Checkpoint로 변환
+	pcp := &persistence.Checkpoint{
+		SequenceNum: checkpoint.SequenceNum,
+		Digest:      checkpoint.Digest,
+		NodeID:      checkpoint.NodeID,
+	}
+	return store.SaveCheckpoint(pcp)
 }

@@ -3,6 +3,8 @@ package node
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
@@ -222,11 +224,30 @@ func (n *Node) Start(ctx context.Context) error {
 	// Start Reactor (트랜잭션 브로드캐스트용)
 	if n.reactor != nil {
 		// Reactor에 브로드캐스터 설정 (Transport를 래핑)
-		n.reactor.SetBroadcaster(&transportBroadcaster{transport: n.transport})
+		n.reactor.SetBroadcaster(&transportBroadcaster{
+			transport: n.transport,
+			nodeID:    n.config.NodeID,
+		})
 		if err := n.reactor.Start(); err != nil {
 			return fmt.Errorf("failed to start reactor: %w", err)
 		}
 		n.logger.Printf("[Node] Mempool reactor started")
+	}
+
+	// TxHandler 설정 - 다른 피어로부터 수신한 트랜잭션을 Mempool에 추가
+	// 이를 통해 모든 노드의 Mempool이 동기화됨
+	if n.transport != nil && n.mempool != nil {
+		n.transport.SetTxHandler(func(txData []byte, sender string, nonce, gasPrice, gasLimit uint64) error {
+			// 수신한 트랜잭션을 로컬 Mempool에 추가
+			err := n.mempool.AddTxWithMeta(txData, sender, nonce, gasPrice, gasLimit)
+			if err != nil {
+				n.logger.Printf("[Node] Failed to add received tx to mempool: %v", err)
+				return err
+			}
+			n.logger.Printf("[Node] Added received tx to mempool (size: %d)", n.mempool.Size())
+			return nil
+		})
+		n.logger.Printf("[Node] Transaction handler configured")
 	}
 
 	// Start metrics server if enabled
@@ -420,20 +441,76 @@ func (n *Node) GetMempoolSize() int {
 
 // transportBroadcaster adapts GRPCTransport to mempool.Broadcaster interface.
 // Transport를 Mempool Broadcaster 인터페이스에 맞게 래핑합니다.
+//
+// [트랜잭션 브로드캐스트 흐름]
+//
+//   Client              Node A              Node B, C, D
+//      │                   │                      │
+//      │  1. SubmitTx()    │                      │
+//      │ ─────────────────►│                      │
+//      │                   │                      │
+//      │                   │ 2. Mempool에 추가    │
+//      │                   │    + BroadcastTx()   │
+//      │                   │ ────────────────────►│
+//      │                   │                      │
+//      │                   │                      │ 3. 각 노드 Mempool에 추가
+//      │                   │                      │
+//      │                   │ 4. 리더가 블록 제안  │
+//      │                   │◄────────────────────│
+//      │                   │                      │
+//
 type transportBroadcaster struct {
 	transport *transport.GRPCTransport
+	nodeID    string // 발신 노드 ID (루프 방지용)
 }
 
 // BroadcastTx broadcasts a transaction to all peers.
+// 클라이언트로부터 받은 트랜잭션을 모든 피어에게 전파합니다.
+// 이를 통해 모든 노드의 Mempool이 동기화됩니다.
 func (b *transportBroadcaster) BroadcastTx(tx []byte) error {
-	// TODO: 트랜잭션 전용 메시지 타입 추가 필요
-	// 현재는 간단히 로그만 출력
-	// 실제 구현에서는 트랜잭션 메시지를 생성하여 브로드캐스트해야 함
-	return nil
+	if b.transport == nil {
+		return nil
+	}
+
+	// 트랜잭션 해시 생성 (중복 체크용)
+	txHash := computeTxHash(tx)
+
+	// GRPCTransport를 통해 모든 피어에게 브로드캐스트
+	// sender, nonce, gasPrice, gasLimit은 현재 0으로 설정
+	// 실제로는 트랜잭션을 파싱해서 추출해야 함
+	return b.transport.BroadcastTransaction(
+		tx,      // txData
+		txHash,  // txHash
+		"",      // sender (파싱 필요)
+		0,       // nonce
+		0,       // gasPrice
+		0,       // gasLimit
+	)
 }
 
 // SendTx sends a transaction to a specific peer.
+// 특정 피어에게만 트랜잭션을 전송합니다.
+// 예: 새로 참여한 노드에게 pending 트랜잭션 동기화
 func (b *transportBroadcaster) SendTx(peerID string, tx []byte) error {
-	// TODO: 특정 피어에게 트랜잭션 전송
-	return nil
+	if b.transport == nil {
+		return nil
+	}
+
+	txHash := computeTxHash(tx)
+
+	return b.transport.SendTransaction(
+		peerID,
+		tx,
+		txHash,
+		"",
+		0,
+		0,
+		0,
+	)
+}
+
+// computeTxHash computes SHA256 hash of transaction and returns hex string.
+func computeTxHash(tx []byte) string {
+	hash := sha256.Sum256(tx)
+	return hex.EncodeToString(hash[:])
 }

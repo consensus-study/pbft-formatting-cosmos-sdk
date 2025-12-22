@@ -25,6 +25,12 @@ service PBFTService {
 
     // 노드 상태 조회
     rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+
+    // 트랜잭션 브로드캐스트 (모든 피어에게 전파)
+    rpc BroadcastTx(BroadcastTxRequest) returns (BroadcastTxResponse);
+
+    // 특정 노드에게 트랜잭션 전송
+    rpc SendTx(SendTxRequest) returns (SendTxResponse);
 }
 
 message BroadcastMessageRequest {
@@ -74,4 +80,28 @@ message GetStatusResponse {
     bytes last_app_hash = 4;
     int32 peer_count = 5;
     bool is_primary = 6;
+}
+
+// 트랜잭션 브로드캐스트 요청
+message BroadcastTxRequest {
+    TxMessage tx = 1;
+}
+
+// 트랜잭션 브로드캐스트 응답
+message BroadcastTxResponse {
+    bool success = 1;
+    string error = 2;
+    string tx_hash = 3;
+}
+
+// 특정 노드에게 트랜잭션 전송 요청
+message SendTxRequest {
+    string target_node_id = 1;
+    TxMessage tx = 2;
+}
+
+// 트랜잭션 전송 응답
+message SendTxResponse {
+    bool success = 1;
+    string error = 2;
 }

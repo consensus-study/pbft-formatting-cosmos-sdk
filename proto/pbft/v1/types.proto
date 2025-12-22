@@ -122,3 +122,19 @@ message Validator {
 message ValidatorSet {
     repeated Validator validators = 1;
 }
+
+// ================================================================================
+//                          트랜잭션 브로드캐스트 관련 메시지
+// ================================================================================
+
+// 노드 간 트랜잭션 전파를 위한 메시지
+message TxMessage {
+    bytes tx_data = 1;       // 트랜잭션 원본 데이터
+    string tx_hash = 2;      // 트랜잭션 해시 (중복 체크용)
+    string sender = 3;       // 트랜잭션 발신자
+    uint64 nonce = 4;        // 발신자 nonce
+    uint64 gas_price = 5;    // 가스 가격
+    uint64 gas_limit = 6;    // 가스 한도
+    google.protobuf.Timestamp timestamp = 7; // 수신 시간
+    string from_node = 8;    // 전파한 노드 ID
+}
