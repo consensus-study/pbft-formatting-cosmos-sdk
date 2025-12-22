@@ -1,3 +1,4 @@
+
 // proto_impl.go - protobuf Message 인터페이스 구현
 // gRPC에서 사용하기 위해 proto.Message 인터페이스를 구현
 package pbftv1
